@@ -4,11 +4,13 @@ Provides SQLite-backed execution recording and a self-contained HTML
 dashboard with auto-refreshing history table and test analytics.
 """
 
+import hashlib
 import json
 import os
 import sqlite3
 import statistics
 import threading
+import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,7 +71,19 @@ def init_db() -> None:
             completion_tokens INTEGER DEFAULT 0,
             prompt_cache_hit_tokens INTEGER DEFAULT 0,
             prompt_cache_miss_tokens INTEGER DEFAULT 0,
-            cost_rmb REAL DEFAULT 0
+            cost_rmb REAL DEFAULT 0,
+            metadata_json TEXT
+        )
+    """)
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS admin_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            action TEXT NOT NULL,
+            target_id TEXT,
+            remote_host TEXT,
+            allowed INTEGER NOT NULL,
+            detail TEXT
         )
     """)
     db.execute("""
@@ -89,6 +103,23 @@ def init_db() -> None:
             stderr_excerpt TEXT
         )
     """)
+    for table in ("executions", "analysis_events", "llm_usage"):
+        try:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+    try:
+        db.execute("ALTER TABLE llm_usage ADD COLUMN metadata_json TEXT")
+    except sqlite3.OperationalError:
+        pass
+    # Never backfill historical records: retry rows used to store initial code.
+    columns = {row[1] for row in db.execute("PRAGMA table_info(executions)")}
+    for name in ("code_sha256", "record_version", "executor_evidence_json"):
+        if name not in columns:
+            db.execute(f"ALTER TABLE executions ADD COLUMN {name} TEXT")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_executions_run_id ON executions(run_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_analysis_events_run_id ON analysis_events(run_id)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_llm_usage_run_id ON llm_usage(run_id)")
     db.commit()
     db.close()
 
@@ -103,12 +134,33 @@ def record_execution(
     stderr: str,
     attempt_count: int = 1,
     image_base64: str | None = None,
-) -> None:
+    run_id: str | None = None,
+    execution_evidence: dict | None = None,
+    candidate_context: dict | None = None,
+) -> str:
+    run_id = run_id or str(uuid.uuid4())
+    evidence_json = None
+    # Reserved intake context is captured by the internal execution path, not
+    # accepted from executor evidence or the public analysis tool.
+    execution_evidence = dict(execution_evidence) if type(execution_evidence) is dict else {}
+    execution_evidence.pop("candidate_intake", None)
+    if type(candidate_context) is dict and type(exit_code) is int and type(timed_out) is bool:
+        from app.candidate_intake import prepare
+        if candidate_context == prepare(code,candidate_context.get("scenario_type"),
+                                         candidate_context.get("params_json")):
+            execution_evidence["candidate_intake"] = dict(candidate_context)
+    if execution_evidence:
+        try:
+            evidence_json = json.dumps(execution_evidence, sort_keys=True, allow_nan=False)
+            if len(evidence_json.encode()) > 16000:
+                evidence_json = None
+        except (TypeError, ValueError):
+            pass
     with _write_lock:
         db = _get_db()
         db.execute(
-            "INSERT INTO executions (timestamp, tool_name, code, exit_code, timed_out, duration_ms, stdout, stderr, attempt_count, image_base64) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO executions (timestamp, tool_name, code, exit_code, timed_out, duration_ms, stdout, stderr, attempt_count, image_base64, run_id, code_sha256, record_version, executor_evidence_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.now(timezone.utc).isoformat(),
                 tool_name,
@@ -120,10 +172,15 @@ def record_execution(
                 stderr or "",
                 attempt_count,
                 image_base64,
+                run_id,
+                hashlib.sha256(code.encode("utf-8")).hexdigest(),
+                "gateway-execution.v1",
+                evidence_json,
             ),
         )
         db.commit()
         db.close()
+    return run_id
 
 
 def record_analysis_event(
@@ -138,7 +195,9 @@ def record_analysis_event(
     waveform_base64: str | None,
     stdout_excerpt: str,
     stderr_excerpt: str,
-) -> None:
+    run_id: str | None = None,
+) -> str:
+    run_id = run_id or str(uuid.uuid4())
     """Write result-analysis data to its own event table, not executions."""
     with _write_lock:
         db = _get_db()
@@ -147,8 +206,8 @@ def record_analysis_event(
             INSERT INTO analysis_events (
                 timestamp, exit_code, verdict, max_pressure, rms_pressure,
                 field_shape, has_signal, summary, heatmap_base64,
-                waveform_base64, stdout_excerpt, stderr_excerpt
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                waveform_base64, stdout_excerpt, stderr_excerpt, run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 datetime.now(timezone.utc).isoformat(),
@@ -163,10 +222,12 @@ def record_analysis_event(
                 waveform_base64,
                 stdout_excerpt,
                 stderr_excerpt,
+                run_id,
             ),
         )
         db.commit()
         db.close()
+    return run_id
 
 
 def get_analysis_events(limit: int = 100, since_id: int = 0) -> list[dict]:
@@ -208,6 +269,101 @@ def get_execution(execution_id: int) -> dict | None:
     return result
 
 
+def get_execution_by_run_id(run_id: str) -> dict | None:
+    """Return exactly one immutable gateway execution for an internal run id."""
+    if not isinstance(run_id, str) or not 1 <= len(run_id) <= 128:
+        return None
+    db = _get_db()
+    rows = db.execute("SELECT * FROM executions WHERE run_id = ? LIMIT 2", (run_id,)).fetchall()
+    db.close()
+    if len(rows) != 1:
+        return None
+    result = dict(rows[0])
+    result["timed_out"] = bool(result["timed_out"])
+    return result
+
+
+def find_run_id_for_output(stdout: str, exit_code: int | None) -> str | None:
+    """Resolve an analysis call back to its execution when Dify omits run_id.
+
+    This is a compatibility bridge for the already-published workflow.  New
+    callers should always pass run_id explicitly; stdout matching is only used
+    for the immediately preceding, exact executor payload.
+    """
+    if not stdout:
+        return None
+    db = _get_db()
+    row = db.execute(
+        "SELECT run_id FROM executions WHERE stdout = ? AND exit_code IS ? AND run_id IS NOT NULL "
+        "ORDER BY id DESC LIMIT 2",
+        (stdout, exit_code),
+    ).fetchall()
+    db.close()
+    return row[0]["run_id"] if len(row) == 1 else None
+
+
+def resolve_execution_source(stdout: str, stderr: str, exit_code: int | None,
+                             run_id: str = "") -> dict:
+    """Bind delivered output to a unique server-owned gateway record.
+
+    This proves recording, not genuine acoustic output. Sandbox code can print
+    invented data; caller parameters and physics remain unverified. The database
+    and gateway writes are trusted, not protected against a privileged DB writer.
+    """
+    source = {"matched": False, "scope": "gateway_record",
+              "parameters_bound": False, "physics_validated": False}
+    db = None
+    try:
+        db = _get_db()
+        db.execute("BEGIN")  # Keep output and run-id checks in one read snapshot.
+        if run_id:
+            rows = db.execute("SELECT * FROM executions WHERE run_id=? LIMIT 2", (run_id,)).fetchall()
+        elif stdout:
+            rows = db.execute("SELECT * FROM executions WHERE stdout=? AND stderr=? AND exit_code IS ? LIMIT 2",
+                              (stdout, stderr, exit_code)).fetchall()
+        else:
+            return dict(source, reason="missing_run_reference")
+        if len(rows) != 1:
+            return dict(source, reason="missing_or_ambiguous_execution")
+        row = rows[0]
+        if not row["run_id"] or len(db.execute(
+                "SELECT id FROM executions WHERE run_id=? LIMIT 2",
+                (row["run_id"],)).fetchall()) != 1:
+            return dict(source, reason="missing_or_ambiguous_execution")
+        if row["record_version"] != "gateway-execution.v1" or not row["code_sha256"]:
+            return dict(source, reason="legacy_unverified_execution")
+        if (row["stdout"] != stdout or row["stderr"] != stderr
+                or row["exit_code"] != exit_code):
+            return dict(source, reason="execution_output_mismatch")
+        code_hash = hashlib.sha256(row["code"].encode("utf-8")).hexdigest()
+        if row["code_sha256"] != code_hash:
+            return dict(source, reason="recorded_code_mismatch")
+        dispatch_nonce = ""
+        try:
+            raw_evidence = row["executor_evidence_json"]
+        except (IndexError, KeyError):
+            raw_evidence = None
+        try:
+            parsed = json.loads(raw_evidence) if raw_evidence else {}
+            candidate = parsed.get("gateway_request_nonce") if isinstance(parsed, dict) else None
+            if isinstance(candidate, str) and len(candidate) == 32:
+                dispatch_nonce = candidate
+        except (TypeError, ValueError):
+            dispatch_nonce = ""
+        return dict(source, matched=True, reason="gateway_record_matched",
+                    dispatch_nonce=dispatch_nonce,
+                    run_id=row["run_id"], execution_id=row["id"],
+                    code_sha256=code_hash, record_version=row["record_version"],
+                    stdout_sha256=hashlib.sha256(stdout.encode("utf-8")).hexdigest(),
+                    stderr_sha256=hashlib.sha256(stderr.encode("utf-8")).hexdigest(),
+                    timed_out=bool(row["timed_out"]))
+    except (sqlite3.Error, KeyError, IndexError, TypeError, AttributeError):
+        return dict(source, reason="execution_store_unavailable")
+    finally:
+        if db is not None:
+            db.close()
+
+
 def clear_executions() -> int:
     """清空所有执行历史，返回删除的行数."""
     db = _get_db()
@@ -228,14 +384,20 @@ def get_stats() -> dict:
     return {"total": total, "success": success, "failed": failed, "timeout": timeout}
 
 
-def record_llm_usage(model: str, usage: dict | None, cost_rmb: float) -> None:
-    """记录一次 LLM 调用的 token 用量与估算成本。usage 为 DeepSeek 返回的 usage 字段。"""
+def record_llm_usage(model: str, usage: dict | None, cost_rmb: float,
+                     run_id: str | None = None, metadata: dict | None = None) -> str:
+    """Record one model call with bounded, server-selected non-secret settings."""
     usage = usage or {}
+    run_id = run_id or str(uuid.uuid4())
+    metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True,
+                               separators=(",", ":")) if isinstance(metadata, dict) else None
+    if metadata_json is not None and len(metadata_json.encode("utf-8")) > 4096:
+        raise ValueError("llm usage metadata exceeds 4096 bytes")
     with _write_lock:
         db = _get_db()
         db.execute(
-            "INSERT INTO llm_usage (timestamp, model, prompt_tokens, completion_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens, cost_rmb) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO llm_usage (timestamp, model, prompt_tokens, completion_tokens, prompt_cache_hit_tokens, prompt_cache_miss_tokens, cost_rmb, run_id, metadata_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 datetime.now(timezone.utc).isoformat(),
                 model,
@@ -244,7 +406,22 @@ def record_llm_usage(model: str, usage: dict | None, cost_rmb: float) -> None:
                 usage.get("prompt_cache_hit_tokens") or 0,
                 usage.get("prompt_cache_miss_tokens") or usage.get("prompt_tokens") or 0,
                 cost_rmb,
+                run_id,
+                metadata_json,
             ),
+        )
+        db.commit()
+        db.close()
+    return run_id
+
+
+def record_admin_event(action: str, *, target_id: str | None, remote_host: str | None, allowed: bool, detail: str = "") -> None:
+    """Keep an audit trail for mutating portal operations, including denials."""
+    with _write_lock:
+        db = _get_db()
+        db.execute(
+            "INSERT INTO admin_events (timestamp, action, target_id, remote_host, allowed, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), action, target_id, remote_host, int(allowed), detail[:500]),
         )
         db.commit()
         db.close()
@@ -664,6 +841,27 @@ PORTAL_HTML = r"""<!DOCTYPE html>
   .msg.assistant th { background: var(--surface-2); color: var(--text); }
   .msg.assistant code { background: var(--surface-2); color: var(--text); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
   .msg.assistant pre { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 12px; }
+
+.msg.assistant{width:100%;max-width:100%;min-width:0;line-height:1.65;padding:14px 16px;overflow-wrap:anywhere}
+.msg.assistant h2{font-size:18px;margin:16px 0 8px;color:var(--text)}
+.msg.assistant h3{font-size:15px;margin:12px 0 6px;color:var(--text)}
+.msg.assistant>:first-child{margin-top:0}
+.msg.assistant p,.msg.assistant ul{margin:6px 0 10px}
+.msg.assistant ul{padding-left:22px}
+.msg.assistant code{color:#1e293b;background:#edf1f5;padding:2px 5px;white-space:pre-wrap;overflow-wrap:anywhere}
+.msg.assistant pre{margin:8px 0 0;padding:12px;background:#f4f7fa;color:#1e293b;white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto}
+.msg.assistant pre code{background:transparent;color:inherit;padding:0}
+.msg.assistant th{background:#edf1f5;color:#1e293b}
+.msg.assistant table{width:100%;margin:0}
+.report-table{overflow-x:auto;margin:8px 0 12px}
+.report-output{margin:8px 0 12px;border:1px solid var(--border);border-radius:6px;padding:8px 10px}
+.report-output summary{cursor:pointer;color:#334155;font-size:13px}
+.msg.assistant figure{margin:12px 0}
+.msg.assistant img{display:block;max-width:100%;height:auto;border:1px solid var(--border);border-radius:6px;background:white}
+.msg.assistant img[hidden]{display:none}
+.msg.assistant figcaption{color:#b91c1c;font-size:13px}
+@media(max-width:600px){.chat-log{padding:12px}.msg.assistant{padding:12px}.header{padding:10px 12px;gap:8px;flex-wrap:wrap}.header h1{font-size:16px}.header h1 span{display:none}.input-bar{padding:12px}.input-wrap input{min-width:0;padding:10px}.input-wrap button{padding:10px 14px}}
+
   .msg.assistant .loading-text { color: var(--muted); }
   .merge-hint { margin-top: 10px; color: var(--muted); font-size: 12px; min-height: 16px; }
   @media (max-width: 768px) {
@@ -730,6 +928,11 @@ td,tr{border-color:#cdd5df!important}
       <h2>执行看板</h2>
       <p>查看实时执行记录、代码详情、图像缩略图和失败状态。</p>
       <div class="go">进入看板 →</div>
+    </a>
+    <a class="card" href="/skills">
+      <h2>技能库</h2>
+      <p>查看已验证的基础技能、适用参数、物理证据与生命周期状态。</p>
+      <div class="go">查看技能 →</div>
     </a>
     <a class="card" href="/health">
       <h2>服务状态</h2>
@@ -816,24 +1019,58 @@ async function ask() {
   if (!message) return;
   input.value = '';
   hint.textContent = '';
+  var skillFeedback = document.getElementById('skill-usage-feedback');
+  if (skillFeedback) skillFeedback.textContent = '技能库：本次尚未确认参考调用';
+  window.dispatchEvent(new CustomEvent('acouagent-skill-usage',{detail:{items:[],final:true}}));
 
   conversation.push({role: 'user', content: message});
   renderChat();
   btn.disabled = true;
-  btn.textContent = '⏳ 运行中...';
+  btn.textContent = '运行中...';
 
   var loadingIdx = conversation.length;
-  conversation.push({role: 'assistant', content: '🔬 正在执行仿真（生成代码 → 沙箱计算 → 物理分析），通常需要 30~90 秒，请耐心等待...'});
+  conversation.push({role: 'assistant', content: '正在执行仿真（生成代码 → 沙箱计算 → 物理分析），通常需要 30~90 秒，请耐心等待...'});
   renderChat();
 
   try {
     var resp = await fetch('/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: message, requirement: currentRequirement, session_id: getSessionId()})
+      body: JSON.stringify({stream: true, message: message, requirement: currentRequirement, session_id: getSessionId()})
     });
-    var data = await resp.json();
+    if (!resp.ok) throw new Error('服务返回 HTTP ' + resp.status);
+    var data;
+    if ((resp.headers.get('content-type') || '').includes('application/x-ndjson')) {
+      var reader = resp.body.getReader(), decoder = new TextDecoder(), pending = '';
+      while (true) {
+        var chunk = await reader.read();
+        pending += decoder.decode(chunk.value || new Uint8Array(), {stream: !chunk.done});
+        var lines = pending.split('\n'); pending = lines.pop();
+        for (var line of lines) {
+          if (!line.trim()) continue;
+          var event = JSON.parse(line);
+          if (event.event === 'progress') {
+            conversation[loadingIdx] = {role: 'assistant', content: '当前步骤：' + event.stage + '。请稍候...'};
+            renderChat();
+          } else if (event.event === 'skill_usage') {
+            if (skillFeedback) skillFeedback.textContent = event.skill_usage.message + ' · v' + event.skill_usage.version;
+            window.dispatchEvent(new CustomEvent('acouagent-skill-usage',{detail:{items:[event.skill_usage],final:false}}));
+            conversation[loadingIdx] = {role: 'assistant', content: event.skill_usage.message};
+            renderChat();
+          } else if (event.event === 'result') { data = event; }
+        }
+        if (chunk.done) break;
+      }
+      if (!data) throw new Error('连接中断，未收到完整结果；请勿连续重复发送。');
+    } else { data = await resp.json(); }
+
     var report = data.report || '';
+    if (skillFeedback) skillFeedback.textContent = Array.isArray(data.skill_usage) && data.skill_usage.length ? data.skill_usage.map(function(s) { return s.message + ' · v' + s.version; }).join('；') : '本次未确认交付经过核验的技能参考';
+    window.dispatchEvent(new CustomEvent('acouagent-skill-usage',{detail:{items:Array.isArray(data.skill_usage)?data.skill_usage:[],final:true}}));
+    if (Array.isArray(data.skill_usage) && data.skill_usage.length) {
+      report += '\n\n**技能库调用反馈**\n' + data.skill_usage.map(function(s) { return '- ' + s.message + '（v' + s.version + '，编号 ' + s.skill_id + '）'; }).join('\n');
+    }
+    if (data.workflow_status === 'error' && data.request_id) report += '\n\n请求编号：' + data.request_id;
     currentRequirement = data.requirement || '';
     conversation[loadingIdx] = {role: 'assistant', content: report || '未获取到结果'};
     if (data.merge_used) {
@@ -851,6 +1088,8 @@ function resetChat() {
   conversation = [];
   currentRequirement = '';
   document.getElementById('merge-hint').textContent = '';
+  var feedback = document.getElementById('skill-usage-feedback');
+  if (feedback) feedback.textContent = '';
   renderChat();
   document.getElementById('query-input').focus();
 }
@@ -1220,9 +1459,10 @@ CHAT_HTML = r"""<!DOCTYPE html>
   .modal-box { width: min(520px, 100%); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; padding: 18px; box-shadow: 0 12px 28px rgba(17,24,39,.16); }
   .modal-box h2 { margin: 0 0 12px; font-size: 17px; }
   .modal-box label { display: block; color: var(--muted); font-size: 12px; margin: 10px 0 5px; }
-  .modal-box input { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); font-size: 13px; }
+  .modal-box input, .modal-box select { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); font-size: 13px; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
   .modal-actions button { padding: 7px 14px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); cursor: pointer; font-size: 13px; }
+  .modal-actions button:disabled { opacity: .55; cursor: wait; }
   .modal-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 
   .chat-log {
@@ -1244,6 +1484,27 @@ CHAT_HTML = r"""<!DOCTYPE html>
   .msg.assistant th { background: var(--surface-2); color: var(--text); }
   .msg.assistant code { background: var(--surface-2); color: var(--text); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
   .msg.assistant pre { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 12px; }
+
+.msg.assistant{width:100%;max-width:100%;min-width:0;line-height:1.65;padding:14px 16px;overflow-wrap:anywhere}
+.msg.assistant h2{font-size:18px;margin:16px 0 8px;color:var(--text)}
+.msg.assistant h3{font-size:15px;margin:12px 0 6px;color:var(--text)}
+.msg.assistant>:first-child{margin-top:0}
+.msg.assistant p,.msg.assistant ul{margin:6px 0 10px}
+.msg.assistant ul{padding-left:22px}
+.msg.assistant code{color:#1e293b;background:#edf1f5;padding:2px 5px;white-space:pre-wrap;overflow-wrap:anywhere}
+.msg.assistant pre{margin:8px 0 0;padding:12px;background:#f4f7fa;color:#1e293b;white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto}
+.msg.assistant pre code{background:transparent;color:inherit;padding:0}
+.msg.assistant th{background:#edf1f5;color:#1e293b}
+.msg.assistant table{width:100%;margin:0}
+.report-table{overflow-x:auto;margin:8px 0 12px}
+.report-output{margin:8px 0 12px;border:1px solid var(--border);border-radius:6px;padding:8px 10px}
+.report-output summary{cursor:pointer;color:#334155;font-size:13px}
+.msg.assistant figure{margin:12px 0}
+.msg.assistant img{display:block;max-width:100%;height:auto;border:1px solid var(--border);border-radius:6px;background:white}
+.msg.assistant img[hidden]{display:none}
+.msg.assistant figcaption{color:#b91c1c;font-size:13px}
+@media(max-width:600px){.chat-log{padding:12px}.msg.assistant{padding:12px}.header{padding:10px 12px;gap:8px;flex-wrap:wrap}.header h1{font-size:16px}.header h1 span{display:none}.input-bar{padding:12px}.input-wrap input{min-width:0;padding:10px}.input-wrap button{padding:10px 14px}}
+
 
   .input-bar { border-top: 1px solid var(--border); background: var(--surface); padding: 14px 24px; }
   .input-wrap { max-width: 900px; margin: 0 auto; display: flex; gap: 10px; }
@@ -1294,6 +1555,7 @@ CHAT_HTML = r"""<!DOCTYPE html>
   <div class="brand">AcouAgent</div>
   <a class="side-link active" href="/">声学仿真</a>
   <a class="side-link" href="/dashboard">执行看板</a>
+  <a class="side-link" href="/skills">技能库</a>
   <a class="side-link" href="/cache">纠错缓存</a>
 </aside>
 <div class="header">
@@ -1325,16 +1587,23 @@ body{background:var(--bg)!important;color:var(--text)!important}
 
 <div class="modal" id="model-modal">
   <div class="modal-box">
-    <h2>模型接口设置</h2>
-    <label>API Base URL</label>
-    <input id="model-base" type="text" placeholder="https://api.deepseek.com">
-    <label>API Key</label>
-    <input id="model-key" type="password" placeholder="sk-...">
-    <label>Model</label>
-    <input id="model-name" type="text" placeholder="deepseek-chat">
-    <p style="color:var(--muted);font-size:12px;line-height:1.6;margin-top:10px">配置保存在当前浏览器，并在发起请求时发送到本服务。留空时使用服务端默认模型。</p>
+    <h2>连接你的模型</h2>
+    <label for="model-profile">模型来源</label>
+    <select id="model-profile" onchange="toggleByokFields()"></select>
+    <div id="byok-fields" hidden>
+      <label for="byok-base-url">OpenAI 兼容 API 地址</label>
+      <input id="byok-base-url" type="url" autocomplete="off" placeholder="https://api.example.com/v1" oninput="clearModelPreflightResult()">
+      <label for="byok-model">模型名称</label>
+      <input id="byok-model" type="text" autocomplete="off" placeholder="模型 ID" oninput="clearModelPreflightResult()">
+      <label for="byok-api-key">API Key</label>
+      <input id="byok-api-key" type="password" autocomplete="new-password" placeholder="仅发送到这台自部署服务器" oninput="clearModelPreflightResult()">
+    </div>
+    <p id="model-profile-detail" style="color:var(--muted);font-size:12px;line-height:1.6;margin-top:10px">正在读取服务端配置…</p>
+    <p id="model-preflight-result" role="status" aria-live="polite" style="color:var(--muted);font-size:12px;line-height:1.6;white-space:pre-line"></p>
+    <p style="color:var(--muted);font-size:12px;line-height:1.6">密钥仅保存在当前网关进程的临时内存中，到期或重启后失效；不会写入浏览器持久存储、SQLite、日志或技能库。</p>
     <div class="modal-actions">
       <button onclick="closeModelSettings()">取消</button>
+      <button id="model-test-btn" onclick="testModelConnection()">测试连接</button>
       <button class="primary" onclick="saveModelSettings()">保存</button>
     </div>
   </div>
@@ -1348,6 +1617,7 @@ body{background:var(--bg)!important;color:var(--text)!important}
     <button id="ask-btn" onclick="ask()">发送</button>
   </div>
   <div class="merge-hint" id="merge-hint"></div>
+  <div class="merge-hint" id="skill-usage-feedback" role="status" aria-live="polite"></div>
 </div>
 
 <script>
@@ -1385,47 +1655,145 @@ function renderMarkdown(md) {
 var conversation = [];
 var currentRequirement = '';
 
-function loadModelConfig() {
+function getModelProfile() {
+  return sessionStorage.getItem('acouagent_byok_profile') || localStorage.getItem('acouagent_model_profile') || null;
+}
+
+async function loadModelProfiles() {
+  var select = document.getElementById('model-profile');
+  var detail = document.getElementById('model-profile-detail');
+  select.innerHTML = '';
   try {
-    return JSON.parse(localStorage.getItem('acouagent_model_config') || 'null');
+    var resp = await fetch('/api/model-profiles', {headers:{'Accept':'application/json'}});
+    var data = await resp.json();
+    if (!resp.ok || !Array.isArray(data.profiles)) throw new Error(data.error || '无法读取模型配置');
+    var saved = getModelProfile() || data.default_profile;
+    data.profiles.forEach(function(profile) {
+      var option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.label + ' · ' + profile.model + (profile.configured ? '' : '（未配置凭据）');
+      option.disabled = !profile.configured;
+      option.selected = profile.id === saved;
+      select.appendChild(option);
+    });
+    var byok = document.createElement('option');
+    byok.value = '__byok__';
+    byok.textContent = sessionStorage.getItem('acouagent_byok_profile') ? '我的 BYOK 模型（本次会话）' : '使用自己的 API Key（BYOK）';
+    byok.selected = !!sessionStorage.getItem('acouagent_byok_profile');
+    select.appendChild(byok);
+    if (!select.value && data.default_profile) select.value = data.default_profile;
+    if (!select.value) select.value = '__byok__';
+    detail.textContent = data.orchestration_backend === 'local'
+      ? 'BYOK 会用于参数提取、代码生成、审查、解释和重试。公网端点默认要求 HTTPS；本地模型地址需由部署者显式开启。'
+      : '当前是 Dify 兼容模式，BYOK 无法接管 Dify 内部模型。请把 ORCHESTRATION_BACKEND 设为 local。';
+    toggleByokFields();
   } catch(e) {
-    return null;
+    detail.textContent = '无法读取模型配置：' + String(e);
   }
 }
 
-function getModelConfig() {
-  var cfg = loadModelConfig();
-  if (!cfg || !cfg.api_key || !cfg.model) return null;
-  return {
-    base_url: cfg.base_url || 'https://api.deepseek.com',
-    api_key: cfg.api_key,
-    model: cfg.model
-  };
+function toggleByokFields() {
+  var selected = document.getElementById('model-profile').value;
+  document.getElementById('byok-fields').hidden = selected !== '__byok__';
+  clearModelPreflightResult();
+}
+
+function clearModelPreflightResult() {
+  document.getElementById('model-preflight-result').textContent = '';
 }
 
 function openModelSettings() {
-  var cfg = loadModelConfig() || {};
-  document.getElementById('model-base').value = cfg.base_url || 'https://api.deepseek.com';
-  document.getElementById('model-key').value = cfg.api_key || '';
-  document.getElementById('model-name').value = cfg.model || '';
   document.getElementById('model-modal').classList.add('open');
+  loadModelProfiles();
 }
 
 function closeModelSettings() {
   document.getElementById('model-modal').classList.remove('open');
 }
 
-function saveModelSettings() {
-  var cfg = {
-    base_url: document.getElementById('model-base').value.trim(),
-    api_key: document.getElementById('model-key').value.trim(),
-    model: document.getElementById('model-name').value.trim()
-  };
-  if (cfg.api_key && cfg.model) {
-    localStorage.setItem('acouagent_model_config', JSON.stringify(cfg));
-  } else {
-    localStorage.removeItem('acouagent_model_config');
+async function revokeByokProfile() {
+  var profile = sessionStorage.getItem('acouagent_byok_profile');
+  if (!profile) return;
+  sessionStorage.removeItem('acouagent_byok_profile');
+  try {
+    await fetch('/api/byok/session', {method:'DELETE', headers:{'Content-Type':'application/json'}, body:JSON.stringify({profile_id:profile})});
+  } catch (_) {}
+}
+
+async function registerByokForCurrentSession() {
+  var baseUrl = document.getElementById('byok-base-url').value.trim();
+  var model = document.getElementById('byok-model').value.trim();
+  var apiKey = document.getElementById('byok-api-key').value.trim();
+  if (!baseUrl || !model || !apiKey) throw new Error('请填写 API 地址、模型名称和 API Key。');
+  var resp = await fetch('/api/byok/session', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({base_url:baseUrl, model:model, api_key:apiKey})});
+  var data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || 'BYOK 配置失败');
+  await revokeByokProfile();
+  sessionStorage.setItem('acouagent_byok_profile', data.profile_id);
+  localStorage.removeItem('acouagent_model_profile');
+  document.getElementById('byok-api-key').value = '';
+  return data.profile_id;
+}
+
+async function testModelConnection() {
+  var selected = document.getElementById('model-profile').value;
+  var result = document.getElementById('model-preflight-result');
+  var button = document.getElementById('model-test-btn');
+  button.disabled = true;
+  result.textContent = '正在执行一次小型模型调用，不会执行返回的代码…';
+  try {
+    var profile = selected;
+    if (selected === '__byok__') {
+      var hasNewCredential = document.getElementById('byok-api-key').value.trim();
+      profile = hasNewCredential ? await registerByokForCurrentSession() : getModelProfile();
+      if (!profile || !String(profile).startsWith('byok-')) {
+        throw new Error('请填写并测试 BYOK 配置。');
+      }
+    }
+    if (!profile) throw new Error('请选择一个已配置的模型。');
+    var resp = await fetch('/api/model-profiles/test', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({profile_id:profile})
+    });
+    var data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || '模型测试失败');
+    var lines = [
+      data.ok ? '基础兼容测试通过。' : '端点已连接，但基础兼容测试未通过。',
+      '模型：' + String(data.model || ''),
+      '耗时：' + String(data.latency_ms) + ' ms'
+    ];
+    (data.checks || []).forEach(function(item) {
+      lines.push((item.passed ? '通过 · ' : '失败 · ') + String(item.detail || item.id));
+    });
+    lines.push('完整仿真仍需固定题、executor 与物理质量门验收。');
+    result.textContent = lines.join('\n');
+  } catch (e) {
+    result.textContent = '模型测试失败：' + String(e.message || e);
+  } finally {
+    button.disabled = false;
   }
+}
+
+async function saveModelSettings() {
+  var selected = document.getElementById('model-profile').value;
+  var detail = document.getElementById('model-profile-detail');
+  if (selected === '__byok__') {
+    var existing = sessionStorage.getItem('acouagent_byok_profile');
+    if (existing && !document.getElementById('byok-api-key').value.trim()) {
+      closeModelSettings();
+      return;
+    }
+    detail.textContent = '正在注册临时 BYOK 配置…';
+    try {
+      await registerByokForCurrentSession();
+      closeModelSettings();
+    } catch (e) { detail.textContent = 'BYOK 配置失败：' + String(e.message || e); }
+    return;
+  }
+  await revokeByokProfile();
+  if (selected) localStorage.setItem('acouagent_model_profile', selected);
+  else localStorage.removeItem('acouagent_model_profile');
   closeModelSettings();
 }
 
@@ -1442,7 +1810,7 @@ function getSessionId() {
 function renderChat() {
   var log = document.getElementById('chat-log');
   if (!conversation.length) {
-    log.innerHTML = '<div class="chat-empty">💬 输入你的声学仿真需求开始对话。<br>支持多轮修改：例如先描述完整需求，再输入「改成 5 MHz」。</div>';
+    log.innerHTML = '<div class="chat-empty">输入你的声学仿真需求开始对话。<br>支持多轮修改：例如先描述完整需求，再输入「改成 5 MHz」。</div>';
     return;
   }
   log.innerHTML = conversation.map(function(m) {
@@ -1461,24 +1829,60 @@ async function ask() {
   if (!message) return;
   input.value = '';
   hint.textContent = '';
+  var skillFeedback = document.getElementById('skill-usage-feedback');
+  if (skillFeedback) skillFeedback.textContent = '技能库：本次尚未确认参考调用';
+  window.dispatchEvent(new CustomEvent('acouagent-skill-usage',{detail:{items:[],final:true}}));
 
   conversation.push({role: 'user', content: message});
   renderChat();
   btn.disabled = true;
-  btn.textContent = '⏳ 运行中...';
+  btn.textContent = '运行中...';
+  window.dispatchEvent(new CustomEvent('acouagent-progress',{detail:'请求已提交 · 等待工作流返回进度'}));
 
   var loadingIdx = conversation.length;
-  conversation.push({role: 'assistant', content: '🔬 正在执行仿真（生成代码 → 沙箱计算 → 物理分析），通常需要 30~90 秒，请耐心等待...'});
+  conversation.push({role: 'assistant', content: '正在执行仿真（生成代码 → 沙箱计算 → 物理分析），通常需要 30~90 秒，请耐心等待...'});
   renderChat();
 
   try {
     var resp = await fetch('/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: message, requirement: currentRequirement, session_id: getSessionId(), model_config: getModelConfig()})
+      body: JSON.stringify({stream: true, message: message, requirement: currentRequirement, session_id: getSessionId(), model_profile: getModelProfile()})
     });
-    var data = await resp.json();
+    if (!resp.ok) throw new Error('服务返回 HTTP ' + resp.status);
+    var data;
+    if ((resp.headers.get('content-type') || '').includes('application/x-ndjson')) {
+      var reader = resp.body.getReader(), decoder = new TextDecoder(), pending = '';
+      while (true) {
+        var chunk = await reader.read();
+        pending += decoder.decode(chunk.value || new Uint8Array(), {stream: !chunk.done});
+        var lines = pending.split('\n'); pending = lines.pop();
+        for (var line of lines) {
+          if (!line.trim()) continue;
+          var event = JSON.parse(line);
+          if (event.event === 'progress') {
+            window.dispatchEvent(new CustomEvent('acouagent-progress',{detail:'当前步骤：'+event.stage}));
+            conversation[loadingIdx] = {role: 'assistant', content: '当前步骤：' + event.stage + '。请稍候...'};
+            renderChat();
+          } else if (event.event === 'skill_usage') {
+            if (skillFeedback) skillFeedback.textContent = event.skill_usage.message + ' · v' + event.skill_usage.version;
+            window.dispatchEvent(new CustomEvent('acouagent-skill-usage',{detail:{items:[event.skill_usage],final:false}}));
+            conversation[loadingIdx] = {role: 'assistant', content: event.skill_usage.message};
+            renderChat();
+          } else if (event.event === 'result') { data = event; }
+        }
+        if (chunk.done) break;
+      }
+      if (!data) throw new Error('连接中断，未收到完整结果；请勿连续重复发送。');
+    } else { data = await resp.json(); }
+
     var report = data.report || '';
+    if (skillFeedback) skillFeedback.textContent = Array.isArray(data.skill_usage) && data.skill_usage.length ? data.skill_usage.map(function(s) { return s.message + ' · v' + s.version; }).join('；') : '本次未确认交付经过核验的技能参考';
+    window.dispatchEvent(new CustomEvent('acouagent-skill-usage',{detail:{items:Array.isArray(data.skill_usage)?data.skill_usage:[],final:true}}));
+    if (Array.isArray(data.skill_usage) && data.skill_usage.length) {
+      report += '\n\n**技能库调用反馈**\n' + data.skill_usage.map(function(s) { return '- ' + s.message + '（v' + s.version + '，编号 ' + s.skill_id + '）'; }).join('\n');
+    }
+    if (data.workflow_status === 'error' && data.request_id) report += '\n\n请求编号：' + data.request_id;
     currentRequirement = data.requirement || '';
     conversation[loadingIdx] = {role: 'assistant', content: report || '未获取到结果'};
     if (data.merge_used) {
@@ -1490,12 +1894,16 @@ async function ask() {
   renderChat();
   btn.disabled = false;
   btn.textContent = '发送';
+  window.dispatchEvent(new CustomEvent('acouagent-progress',{detail:'本次请求已结束 · 以报告中的成功或失败状态为准'}));
 }
 
 function resetChat() {
+  window.dispatchEvent(new CustomEvent('acouagent-progress',{detail:'等待提交需求 · 进度将随真实工作流更新'}));
   conversation = [];
   currentRequirement = '';
   document.getElementById('merge-hint').textContent = '';
+  var feedback = document.getElementById('skill-usage-feedback');
+  if (feedback) feedback.textContent = '';
   renderChat();
   document.getElementById('query-input').focus();
 }

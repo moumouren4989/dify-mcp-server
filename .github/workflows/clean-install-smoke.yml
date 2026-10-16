@@ -1,0 +1,108 @@
+name: Clean install smoke
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/clean-install-smoke.yml"
+      - ".env.example"
+      - "compose.yaml"
+      - "Dockerfile"
+      - "requirements.lock.txt"
+      - "app/**"
+      - "executor/**"
+      - "scripts/install.sh"
+      - "scripts/install.ps1"
+      - "scripts/diagnostics/**"
+      - "scripts/skill_library/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: clean-install-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clean-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: acouagent-clean-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare secret-free local configuration
+        shell: bash
+        run: bash scripts/install.sh --prepare-only
+
+      - name: Validate and start the clean stack
+        shell: bash
+        run: bash scripts/install.sh
+
+      - name: Verify source identity, skill inventory, and sandbox boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(curl -fsS http://127.0.0.1:8001/health)" = "ok"
+          curl -fsS http://127.0.0.1:8001/api/model-profiles >/tmp/model-profiles.json
+          docker exec dify-mcp python -m scripts.skill_library.local_basic status-all \
+            >/tmp/skill-status.json
+          docker exec dify-mcp python -m scripts.skill_library.audit_report \
+            >/tmp/skill-audit-command.json
+          docker exec dify-mcp python -m scripts.skill_library.audit_report \
+            --verify /app/data/audit/skill-library-audit.json \
+            >/tmp/skill-audit-verify.json
+          docker exec dify-mcp python -c \
+            "import json; r=json.load(open('/app/data/audit/skill-library-audit.json')); assert r['healthy'] is True; assert r['summary']['table_counts']['simulation_skills']==17"
+
+          host_sha="$(sha256sum app/local_workflow.py | cut -d' ' -f1)"
+          image_sha="$(docker exec dify-mcp sha256sum /app/app/local_workflow.py | cut -d' ' -f1)"
+          test "$host_sha" = "$image_sha"
+
+          docker inspect jwave-executor dify-mcp >/tmp/container-inspect.json
+          docker network inspect "${COMPOSE_PROJECT_NAME}_executor_internal" \
+            >/tmp/executor-network.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          profiles = json.loads(Path("/tmp/model-profiles.json").read_text())
+          assert profiles["orchestration_backend"] == "local"
+          assert profiles["default_profile"] is None
+          assert profiles["profiles"] == []
+          assert profiles["byok"]["enabled"] is True
+          assert profiles["byok"]["private_endpoints_allowed"] is False
+
+          status = json.loads(Path("/tmp/skill-status.json").read_text())
+          assert status["ready"] is True
+          assert status["ready_count"] == 17
+          assert status["profile_count"] == 17
+
+          containers = json.loads(Path("/tmp/container-inspect.json").read_text())
+          assert len(containers) == 2
+          for container in containers:
+              host = container["HostConfig"]
+              assert host["ReadonlyRootfs"] is True
+              assert "ALL" in (host.get("CapDrop") or [])
+              assert any(
+                  item == "no-new-privileges:true"
+                  for item in (host.get("SecurityOpt") or [])
+              )
+
+          network = json.loads(Path("/tmp/executor-network.json").read_text())[0]
+          assert network["Internal"] is True
+          PY
+
+      - name: Show service state
+        if: always()
+        run: docker compose ps -a
+
+      - name: Show failure logs
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Remove clean-install resources
+        if: always()
+        run: docker compose down -v --remove-orphans

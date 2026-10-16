@@ -1,21 +1,141 @@
-"""MCP 工具集：6 个工具（环境/白名单/执行/自动纠错/参数校验/库列表）。
+"""MCP 执行、只读检索与默认关闭的服务端技能生成上下文工具。
 
 通过 `register(mcp)` 向网关注册；T-007 analyze_simulation_result 将落在
 `analysis.py`（本模块保持聚焦仿真执行类工具）。
 """
 
 import json
-import os
+import uuid
 from typing import Any
 
 import httpx
 
-from app import cache_store, config, execution, llm
+from app import (
+    cache_store,
+    candidate_intake,
+    config,
+    execution,
+    llm,
+    model_profiles,
+    runtime_registry_service,
+)
 from app.dashboard import record_execution
+
+
+def _record_dispatch_completion(result: dict[str, Any], run_id: str) -> None:
+    """Bind a matched approval window to an immutable per-dispatch receipt.
+
+    Runs after the dispatch, when the run id is known. Absent or unmatched
+    approval wiring is a no-op: nothing is written and no database is created.
+    """
+    evidence = result.get("execution_evidence")
+    usage = evidence.get("approval_usage") if isinstance(evidence, dict) else None
+    if not isinstance(usage, dict):
+        return
+    nonce = evidence.get("gateway_request_nonce", "")
+    usage["completion"] = runtime_registry_service.record_dispatch_completion(usage, nonce, run_id)
+
+
+def _finalize_skill_learning(result: dict[str, Any], run_id: str,
+                             candidate_context: dict[str, Any] | None) -> None:
+    """Finalize one recorded execution through the internal learning gates.
+
+    Exact server-owned profiles get the deterministic Q4 path first. Generic
+    generated code can only become a Q2 candidate. The two paths are ordered so
+    a successful Q4 admission is never followed by a lower-grade write for the
+    same run. Optional storage failures never change the execution result.
+    """
+    learning_enabled = (config.SKILL_LIBRARY_ENABLED is True
+                        and config.SKILL_LEARNING_ENABLED is True)
+    fixed = None
+    if config.fixed_intake_enabled():
+        from app import skill_local_profile
+        fixed = skill_local_profile.record(run_id)
+        result["local_skill_intake"] = fixed
+        if fixed.get("recorded") and (fixed.get("admitted") or fixed.get("duplicate")):
+            if learning_enabled:
+                result["skill_learning"] = {
+                    "recorded": True,
+                    "skill_id": fixed.get("skill_id"),
+                    "status": "active",
+                    "quality_level": fixed.get("quality_level", "Q4"),
+                    "reason": fixed.get("reason"),
+                }
+            return
+    if candidate_context is not None:
+        candidate = candidate_intake.complete(run_id)
+        result["candidate_accumulation"] = candidate
+        result["skill_learning"] = {
+            "recorded": candidate.get("recorded") is True,
+            "skill_id": candidate.get("skill_id"),
+            "status": "candidate" if candidate.get("recorded") is True else None,
+            "quality_level": "Q2" if candidate.get("recorded") is True else None,
+            "reason": candidate.get("reason"),
+        }
+    elif fixed is not None and learning_enabled:
+        result["skill_learning"] = {
+            "recorded": False,
+            "skill_id": None,
+            "status": None,
+            "quality_level": None,
+            "reason": fixed.get("reason", "learning_not_applicable"),
+        }
 
 
 def register(mcp) -> None:
     """向 FastMCP 实例注册本模块的全部工具。"""
+
+    @mcp.tool
+    def search_simulation_skill(scenario_type: str, parameters_json: str, limit: int = 3) -> dict[str, Any]:
+        """Read-only skill lookup after parameter extraction, before generation.
+
+        Default disabled; returns no reusable code until provenance is authenticated.
+        Limit is 1–3. No learning, activation, database path or trust flag inputs.
+        """
+        from app.skill_retrieval import search
+        return search(scenario_type, parameters_json, limit)
+
+    @mcp.tool
+    def build_simulation_generation_context(original_context: str, scenario_type: str,
+                                            parameters_json: str) -> dict[str, Any]:
+        """Workflow-only generation context, default off with unchanged input.
+
+        Uses only revalidated server-held local profiles or signed fixed-profile evidence. No caller code,
+        grade, proof, trust boolean, database path or execution inputs. Search
+        remains a separate read-only tool. A handoff audits reference delivery,
+        not actual model/executor/user use; it never runs simulation code.
+        """
+        if type(original_context) is not str or len(original_context.encode("utf-8"))>65536:
+            raise ValueError("generation_context_budget")
+        from app.skill_deadline import limited
+        from app.skill_retrieval import generation_context
+        try:
+            with limited(2):
+                return generation_context(original_context,scenario_type=scenario_type,
+                                          parameters_json=parameters_json,_existing_store=True)
+        except TimeoutError:
+            return {"context":original_context,"skill_usage":{"skills":[],"fallback":True,
+                "reason":"generation_context_deadline","actual_use_authenticated":False}}
+
+    @mcp.tool
+    def read_simulation_generation_context(original_context: str, scenario_type: str,
+                                           parameters_json: str, decision_id: str,
+                                           generation_run_id: str) -> str:
+        """Read-only committed handoff pointer, freshly reverified; default off.
+
+        No caller code, proof or trust flags. Invalid/expired/withdrawn pointers
+        return the original context. This never executes simulation code.
+        """
+        if type(original_context) is not str or len(original_context.encode("utf-8"))>65536:
+            raise ValueError("generation_context_budget")
+        from app.skill_deadline import limited
+        from app.skill_reference_consumer import read_committed_context
+        try:
+            with limited(2):
+                return read_committed_context(decision_id=decision_id,generation_run_id=generation_run_id,
+                    scenario_type=scenario_type,parameters_json=parameters_json,original_context=original_context)
+        except TimeoutError:
+            return original_context
 
     @mcp.tool
     def list_installed_libraries() -> dict[str, Any]:
@@ -26,7 +146,8 @@ def register(mcp) -> None:
             "auto_fix_tool": "run_jwave_code_with_retry",
             "analysis_tool": "analyze_simulation_result",
             "validator_tool": "validate_simulation_params",
-            "deepseek_model": config.DEEPSEEK_MODEL if config.DEEPSEEK_API_KEY else None,
+            "model_runtime": "openai-compatible-byok",
+            "configured_environment_profiles": len(model_profiles.load_profiles()),
         }
 
     @mcp.tool
@@ -41,8 +162,12 @@ def register(mcp) -> None:
         return response.json()
 
     @mcp.tool
-    def run_jwave_code(code: str, timeout_seconds: int = 15) -> dict[str, Any]:
-        """Run Dify-generated Python in the packaged jwave environment."""
+    def run_jwave_code(code: str, timeout_seconds: int = 15, run_id: str = "",
+                       scenario_type: str = "", params_json: str = "{}") -> dict[str, Any]:
+        """Run Python; optional scenario/parameters record an unverified Q2 candidate.
+
+        Learning requires both server switches. Declared parameters never confer trust.
+        """
         if not isinstance(code, str) or not code.strip():
             raise ValueError("code must be a non-empty Python string")
         code = execution._clean_code(code)
@@ -50,7 +175,10 @@ def register(mcp) -> None:
             raise ValueError("code is limited to 20000 characters")
         if not 1 <= timeout_seconds <= 30:
             raise ValueError("timeout_seconds must be between 1 and 30")
+        run_id = run_id or str(uuid.uuid4())
+        candidate_context = candidate_intake.prepare(code, scenario_type, params_json)
         result = execution._execute_code(code, timeout_seconds)
+        _record_dispatch_completion(result, run_id)
         result["stdout"] = execution._shrink_field_in_stdout(result.get("stdout", ""))
         execution._normalize_result_artifacts(result)
         record_execution(
@@ -63,7 +191,12 @@ def register(mcp) -> None:
             stderr=result.get("stderr", ""),
             attempt_count=1,
             image_base64=result.get("image_base64"),
+            run_id=run_id,
+            execution_evidence=result.get("execution_evidence"),
+            candidate_context=candidate_context,
         )
+        result["run_id"] = run_id
+        _finalize_skill_learning(result, run_id, candidate_context)
         return result
 
     @mcp.tool
@@ -71,11 +204,15 @@ def register(mcp) -> None:
         code: str,
         timeout_seconds: int = 15,
         max_retries: int | None = None,
+        run_id: str = "",
+        scenario_type: str = "",
+        params_json: str = "{}",
+        model_profile: str = "",
     ) -> dict[str, Any]:
-        """Run Python code and auto-fix errors using DeepSeek LLM.
+        """Run Python code and auto-fix errors using the selected BYOK profile.
 
         Executes the code in the sandboxed jwave environment.  If the code fails
-        (non-zero exit code or timeout), the tool sends the error output to DeepSeek
+        (non-zero exit code or timeout), the tool sends the error output to the model
         and asks it to produce a corrected version, then re-executes.  This loop
         continues until the code succeeds or *max_retries* is exhausted.
 
@@ -94,18 +231,17 @@ def register(mcp) -> None:
         if not 0 <= max_retries <= 7:
             raise ValueError("max_retries must be between 0 and 7")
 
-        if not config.DEEPSEEK_API_KEY:
-            raise RuntimeError(
-                "DEEPSEEK_API_KEY must be set in the server environment "
-                "to use auto-fix. Use run_jwave_code for plain execution."
-            )
+        resolved_profile, _ = model_profiles.resolve(model_profile or None, "retry")
 
+        run_id = run_id or str(uuid.uuid4())
         current_code = code
         history: list[dict[str, Any]] = []
         last_error_sig: str | None = None
 
         for attempt in range(max_retries + 1):  # 首次 + N 次重试
+            candidate_context = candidate_intake.prepare(current_code, scenario_type, params_json)
             result = execution._execute_code(current_code, timeout_seconds)
+            _record_dispatch_completion(result, run_id)
             result["stdout"] = execution._shrink_field_in_stdout(result.get("stdout", ""))
             execution._normalize_result_artifacts(result)
             step = {
@@ -124,6 +260,7 @@ def register(mcp) -> None:
                 result["history"] = history
                 result["final_code"] = current_code
                 result["total_attempts"] = attempt + 1
+                result["run_id"] = run_id
                 result["report"] = execution._build_report(result, code)
                 if last_error_sig:
                     try:
@@ -132,7 +269,7 @@ def register(mcp) -> None:
                         pass
                 record_execution(
                     tool_name="run_jwave_code_with_retry",
-                    code=code,
+                    code=current_code,
                     exit_code=result["exit_code"],
                     timed_out=False,
                     duration_ms=result.get("duration_ms"),
@@ -140,7 +277,11 @@ def register(mcp) -> None:
                     stderr=result.get("stderr", ""),
                     attempt_count=attempt + 1,
                     image_base64=result.get("image_base64"),
+                    run_id=run_id,
+                    execution_evidence=result.get("execution_evidence"),
+                    candidate_context=candidate_context,
                 )
+                _finalize_skill_learning(result, run_id, candidate_context)
                 return result
 
             # 已达最大重试次数
@@ -149,6 +290,7 @@ def register(mcp) -> None:
                 result["final_code"] = current_code
                 result["total_attempts"] = attempt + 1
                 result["error"] = "max_retries exhausted"
+                result["run_id"] = run_id
                 result["report"] = execution._build_report(result, code)
                 if last_error_sig:
                     try:
@@ -157,7 +299,7 @@ def register(mcp) -> None:
                         pass
                 record_execution(
                     tool_name="run_jwave_code_with_retry",
-                    code=code,
+                    code=current_code,
                     exit_code=result["exit_code"],
                     timed_out=result.get("timed_out", False),
                     duration_ms=result.get("duration_ms"),
@@ -165,7 +307,11 @@ def register(mcp) -> None:
                     stderr=result.get("stderr", ""),
                     attempt_count=attempt + 1,
                     image_base64=result.get("image_base64"),
+                    run_id=run_id,
+                    execution_evidence=result.get("execution_evidence"),
+                    candidate_context=candidate_context,
                 )
+                _finalize_skill_learning(result, run_id, candidate_context)
                 return result
 
             # 调用 LLM 修正
@@ -175,10 +321,10 @@ def register(mcp) -> None:
             if error_sig:
                 last_error_sig = error_sig
             current_code = llm._llm_fix_code(
-                config.DEEPSEEK_API_KEY,
-                config.DEEPSEEK_MODEL,
+                resolved_profile.profile_id,
                 current_code,
                 result,
+                run_id=run_id,
             )
 
         # 不应该走到这里，但保底
