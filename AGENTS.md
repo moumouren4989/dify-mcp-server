@@ -1,4 +1,54 @@
+> 2026-10-26 主线交付完成：PR37已合入main（698a4f9），正式与演示各161运行文件一致；三库在线备份、升级→回退→再升级通过，executor未重启，原849条逐行保留。正式浏览器新增1次成功、同run看板850；演示纯中文频域新求解Q4（仅幅值）。2131回归、120条模型合同/80次新求解复核及CI通过。队友可按TEAM_QUICKSTART拉main并安装，扩展默认关闭。完整v1.0仍需真人冷启动、独立Luna复核及Owner授权。权威状态见docs/CURRENT_STATUS.md，证据见docs/validation/stage7/PRODUCTION_MODEL_COMPAT_2026-10-26.md。以下较早日期段落均为历史进度，不覆盖本条。
+
+> 2026-10-26 模型技术子门通过：本地Chat/Reasoner/Pro各30加Dify30共120，正例80次新求解均独立回执/数值重核、ID唯一，负例无参考、缺参全部未完成，跨通道差异0。2131回归及fc31846五CI通过；参数故障续行/无声明停止/说明故障保留结果隔离演练通过，临时应用和凭据清理。Dify图69节点SHA46c59e…；PR37待最终合并与正式部署，生产仍630c2f9/849条，v1.0人工门保持开放。
+
+> 2026-10-26 Dify69节点首烟测发现正常边句柄不兼容，未执行但平台标成功；物理门拒绝，已回退64节点，再按实际引擎修正为source（错误边fail-branch）。新图SHA46c59e…已发布且首题新求解通过，2131回归通过；完整Dify批次待重跑。统计脚本按真实runner和末端报告判断，保留平台原状态，旧失败记录不覆盖。main/正式仍630c2f9。
+
+> 2026-10-26 Dify64节点图已发布并实跑，5缺参均在模型/工具前阻断；完整30仍有1次参数模型超时。69节点可用性候选新增只在模型异常时读取已共享校验的原始声明、末端状态提示和辅助说明错误默认值；原代码节点/预算不变，2130回归通过。平台partial状态保留，仅完整真实科学结果可记完成，负例及超时不放宽；发布和完整复验待完成，main/正式仍630c2f9。
+
+> 2026-10-26 本地三组同源码30题合同门通过（60正例独立回执核验，无重复run）；原Dify完整30题为19/20正例、5缺参均补参执行，完整对照未通过。新增共享初压原始声明前置守卫候选与原生Flash迁移，2078回归通过、Dify结构校验通过；发布图/草稿私有备份及公开原图已保存，未发布、未合并。见MODEL_COMPATIBILITY_2026-10-26.md。
+
+> 2026-10-26 纯中文验收发现模型另造uniform_water，被原合同拒绝；仅补齐提取提示合法枚举，不改科学门。a166ee6矩阵试跑停止并保留，最终候选须重新浏览器和完整矩阵验收。
+
+> 2026-10-26 阶段七新候选2032回归通过；7b4400c三条完整30题记录保留（正例Chat20/20、Reasoner17/20、Pro18/20），尚未验收。提取失败时仅对用户原始显式JSON继续原校验/检索/新执行，单独标记模型不可用；纯自然语言仍需成功提取，过期profile拒绝。原生Flash/Pro预设更新，待同SHA完整重跑，main/正式保持630c2f9。
+
+> 2026-10-26 阶段七修订候选2020回归通过：按UUID小响应回查；Reasoner官方思考协议/有界预算，截断拒绝且记已返回usage；辅助说明失败保留真实run与物理等级，单独统计不可用。Chat/Reasoner是旧模式别名，用户已选额外V4-Pro独立模型；旧试跑保留，新三lane须同修订SHA重跑。*.sh固定LF。main/正式仍630c2f9，候选未获完整实际矩阵通过前不合并。
+
+> 2026-10-26 已进入独立阶段七分支：用户选DeepSeek Chat/Reasoner同题30+30；初试因旧驱动批量历史超过2MiB中止，记录保留。候选新增规范UUID精确执行状态入口，白名单五字段，不带代码/输出/图片；首题和矩阵驱动同步，1996回归通过。新矩阵运行前须绑定新候选SHA与独立卷；main/正式仍为已验收630c2f9。
+
+> 2026-10-26 正式交付验收完成：PR35/36已入main，最后代码合并bdf988f；1988回归、五项CI及正式双传感器复制复用通过。正式与演示各161运行文件匹配main，原844行未变；生产默认扩展关闭，演示扩展开启且新任务Q4通过。详情docs/validation/stage7/PRODUCTION_SKILLS_2026-10-26.md。继续保留完整v1.0开放门。
+
+> 2026-10-26 PR35已合入main（1d528df），阶段6检查点2bf7612五项CI成功。正式复测发现初压复制漏参与双传感器输出误判，独立跟进分支已修复，候选平面/界面实际复用与1987回归通过；部署验收须继续，不能把传感器峰值当全场值，不能覆盖旧开发目录工作。
+
 # AGENTS.md — AcouAgent 项目指令手册
+
+> 2026-10-26 阶段6功能验收通过：1961回归、原Dockerfile镜像/151运行文件核对、17项新卷自举、手动21项/反馈6项/产品12项浏览器检查、B02/B03自动学习到新运行Q4复用、纯文字B01、关学习复用、真实缓存命中及旧镜像17恢复均通过。新增历史质量/当前许可分离、任意trial不授级、固定来源下载回退；录屏已生成。扩展默认关闭，main最终集成CI/生产部署须完成后记录；旧开发目录有未提交工作，不覆盖。见docs/skills-next/STAGE6_IMPLEMENTATION.md。
+
+> 2026-10-26 阶段5 bcdeeec（PR34）五项CI成功，checkpoint/skill-stage5-20261026已推送。阶段6补齐显式重验边界、固定参考准备与网关镜像源身份副本；1957回归通过，实际发行镜像/持久卷与浏览器交付矩阵仍在验收。默认关闭、生产/main未改；见docs/skills-next/STAGE6_IMPLEMENTATION.md。
+
+> 2026-10-26 阶段4验收完成（d46192a，PR33五项CI成功，checkpoint/skill-stage4-20261025）。阶段5候选新增管理员手动草稿、可见代码派生、原队列验证/接纳、热图及版本恢复；18项真实浏览器检查与真实模型新任务Q4重执行通过。模型漏回完整频域结果合同的问题已修复并加入负例。默认关闭、schema18、无生产写入；最终回归/CI及阶段6见docs/skills-next/STAGE5_IMPLEMENTATION.md。
+
+> 2026-10-25 阶段3验收完成（cd4c93e，五项CI成功，checkpoint/skill-stage3-20261025），阶段4候选已实现受控来源→自动建稿/验证/接纳与后台恢复；三题9次真实求解、3候选/3验证/3接纳/3复用，默认关闭、无生产写入。见 docs/skills-next/STAGE4_IMPLEMENTATION.md 与 VERSION_CHECKPOINTS.md；接着阶段5手动入口。
+
+> 2026-10-23 阶段3候选：受控Helmholtz可见派生、精确独立比较、原目录Q4接纳、v2检索/消费/新运行复用已通过三题六次原executor实跑；仅精确幅值认证，不泛化/不认证相位。默认关闭、生产未改；自动学习事件/手动界面仍待阶段4/5。见 docs/skills-next/STAGE3_IMPLEMENTATION.md。
+
+> 2026-10-23 阶段2候选：持久trial队列/租约/取消/未知派发对账、完整复数结果与同源指标已实现，原executor三题各一次实跑完成。默认双开关关闭，无HTTP/UI、后台自动启动、独立物理授级或新接纳；schema仍显式18。见 docs/skills-next/STAGE2_IMPLEMENTATION.md，生产未改。
+
+> 2026-10-23 阶段1候选：严格SkillSpec/normalizer_v2、内部草稿幂等版本与CAS、默认17/显式备份扩展18已实现，默认关闭；HTTP/UI/验证worker与新技能接纳尚未实现。见 docs/skills-next/STAGE1_IMPLEMENTATION.md，生产未迁移。
+
+> 2026-10-23 准备完成：SkillSpec/API/迁移/任务与验证合同见 docs/skills-next/；B01–B03原沙箱数值探针通过，17项工具测试及格式/DDL检查通过。下一步阶段1，不将准备验证当新技能接纳/复用已实现；当前生产不变。
+
+> 2026-10-23 方案细化：docs/NEXT_STAGE_PLAN.md 已按官方资料和当前代码核对为七阶段；先做非固定配方技术探针，再开发统一验证与接纳。阶段 3 后自动学习与手动添加可并行。本轮仅计划，未改当前架构或启用能力。
+
+> 2026-10-23：下一阶段以自动学习和用户按统一格式添加技能为 P0，执行范围与验收见 [docs/NEXT_STAGE_PLAN.md](docs/NEXT_STAGE_PLAN.md)。用户内容先校验和实跑，服务端独立核验证据后才接纳，禁止上传自授质量等级。当前架构与发布状态未变。
+
+> 2026-10-22：仓库已更名为 MWXrookie/AcouAgent；README 为产品介绍，技术部署细节迁至 docs/TECHNICAL_GUIDE.md。队友安装和 origin 更新见 docs/TEAM_QUICKSTART.md。内部发行、镜像、容器、数据卷标识与架构保持不变；版本仍为 0.1.0 测试版。
+
+> 2026-10-22：测试与正式网关的131个运行文件及2个依赖锁文件与main一致。高斯初压候选回归补全显式结束时间，继续拒绝缺失/无效时间；队友安装与更新见docs/TEAM_QUICKSTART.md。应用及executor安全边界未改，其他v1.0门仍开放。
+
+> 2026-10-21：初压合同共享预检、显式周期声明与固定参考热力图修复已完成候选 Portal 验收（238 项相关回归）；正式服务已于2026-10-21升级至c19b68b并完成核心浏览器复验；以docs/CURRENT_STATUS.md及正式部署记录为准。证据见 docs/validation/stage7/PORTAL_INITIAL_PRESSURE_UAT_2026-10-21.md。
+
+> 2026-10-16 当前状态：发行默认使用本地编排，门户和环境变量均支持用户自带 OpenAI-compatible 模型；模型调用统一通过 `app/model_client.py` 的脱敏受限传输，自动纠错不再维护平行 HTTP 实现。阶段七 Dify 固定集已完成 30/30，两个本地 BYOK lane、全新机器自然语言首题和 VM 回滚终验仍未关闭；不得把部分矩阵写成完整 v1.0 发布。权威状态入口为 `docs/CURRENT_STATUS.md`。
 
 > 本文档面向项目中的所有 AI Agent。Agent 在执行任何任务之前，必须先阅读本文档以获取项目上下文、当前状态和可执行任务。
 
@@ -6,7 +56,12 @@
 
 > 📏 **每次提交前必读**：`docs/COMMIT_CONVENTION.md`（提交信息格式 + 检查清单：密钥红线/可移植性/验证要求）。不遵守规范 = 提交被拒。
 
+> 2026-10-11 当前代码范围：schema17、9工具、两项精确本机基础技能；人工接纳/实际参考执行可用，学习默认关闭、Dify草稿未发布、整体合同未通过。最新使用以根 README 和验收矩阵为准。
+
 ---
+
+> ⚠️ **2026-10-07 起**：开发规划以 **`docs/DEVELOPMENT_PLAN.md` v3.0** 为准（终点＝"下载即用"的本地技能库系统），验收依据见 `docs/SKILL_LIBRARY_ACCEPTANCE.md`。
+> 本文档第 2 节「当前状态」与第 3 节「任务队列」是 **2026-08 的历史快照，已过期**（如"34 次测试 76%""8 节点 draft""5 个 MCP 工具"），仅作历史参考；v2.1 规划全文已归档于 `docs/archive/DEVELOPMENT_PLAN_v2.1.md`。
 
 ## 0. 项目记忆
 
@@ -103,7 +158,7 @@ acouagent,dify-mcp-server,architecture,optimization
 | `app/config.py` | ~30 | 环境配置与校验 | 低 |
 | `app/cache_store.py` | ~200 | 纠错经验缓存 SQLite | 中 |
 | `app/execution.py` | ~150 | 代码清理/沙箱执行/报告生成 | 中 |
-| `app/llm.py` | ~100 | DeepSeek 自动纠错 | 低 |
+| `app/llm.py` | ~130 | BYOK profile 自动纠错 | 低 |
 | `app/tools.py` | ~330 | MCP 工具集（6 个） | 中（新增工具时） |
 | `app/portal.py` | ~170 | Web 门户路由 | 中 |
 | `app/analysis.py` | 占位 | 结果分析（T-007 落点） | 中（T-007 后） |
@@ -235,7 +290,7 @@ Agent 应**按编号顺序**领取任务。每完成一个任务，在 `docs/CHA
 | 验收 | 使用标准点源模板代码执行，max_pressure > 0 |
 
 **执行步骤**：
-1. 在 executor 容器中直接执行 jwave 源码检查：`docker exec jwave-executor /opt/jwave/bin/python -c "from jwave.geometry import Sources; help(Sources.__init__)"`
+1. 在 executor 容器中直接执行 jwave 源码检查：`docker exec jwave-executor python -c "from jwave.geometry import Sources; help(Sources.__init__)"`
 2. 读 jwave 源码中 `Sources.on_grid()` 的实现，确认 source term 如何注入 time stepping
 3. 写一个最小复现脚本，对比 Sources 方式 vs p0 方式的差异
 4. 如果 Sources 本身有问题，输出 workaround 方案；如果是用法问题，更新知识库
@@ -527,3 +582,5 @@ tests/
 - [ ] `curl http://192.168.30.200` — Dify 平台可访问
 - [ ] 查阅 `docs/CHANGELOG.md` 了解上次会话做了什么
 - [ ] 查阅本文档第 3 节找到下一个 `[TODO]` 任务
+
+- 2026-10-21 浏览器全流程候选验收：技能复制请求（含 JS 数值/场景元数据）、多轮修改、真实缓存命中重试、看板独立分析与重跑已覆盖；详见 docs/validation/stage7/PORTAL_BROWSER_FULL_FLOW_UAT_2026-10-21.md。851项相关测试通过，正式052cee7及executor限制未改。

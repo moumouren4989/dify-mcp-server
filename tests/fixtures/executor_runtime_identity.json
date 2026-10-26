@@ -1,0 +1,13 @@
+{
+  "executor_source_sha256": "207dfbc8fb6ff290b37b9091deed82908468423af5aae2b9259394e5acf9981d",
+  "library_versions": {
+    "jax": "0.4.38",
+    "jaxdf": "0.2.8",
+    "jaxlib": "0.4.38",
+    "jwave": "0.2.1",
+    "numpy": "1.26.4"
+  },
+  "machine": "x86_64",
+  "python_implementation": "CPython",
+  "python_version": "3.11.15"
+}

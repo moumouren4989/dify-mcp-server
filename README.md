@@ -1,200 +1,130 @@
-# Dify FastMCP JWave Server
+# AcouAgent
 
-声学仿真 MCP 服务平台。Dify 工作流 → MCP 网关 → 沙箱执行器 → Markdown 报告。
+### 用自然语言完成声学仿真，让结果有据可查
 
-> ℹ️ 文档中的 IP/路径均为**部署环境示例**（默认内网 `192.168.30.200`），按你的环境替换；
-> 测试脚本的网关地址可用环境变量 `GW_BASE_URL` 覆盖。
+AcouAgent 是一款面向声学学习、科研原型验证与教学演示的仿真智能体。
+在浏览器中描述仿真需求，系统会提取参数、检索适用技能、生成并运行 jwave 代码，
+展示声场热力图、数值摘要和结果解读。你可以继续对话修改参数，也可以回到看板查看代码与执行记录。
 
-## 部署架构
+**本地部署 · 自带模型 · 技能复用 · 物理校验 · 执行可追溯**
 
+[快速开始](#快速开始) · [队友安装与更新](docs/TEAM_QUICKSTART.md) · [首次仿真](docs/FIRST_SIMULATION.md) · [当前状态](docs/CURRENT_STATUS.md)
+
+## 可以用它做什么
+
+| 功能 | 你能完成的操作 |
+| --- | --- |
+| 自然语言仿真 | 描述介质、声源和计算条件，由智能体组织仿真；在同一会话继续调整参数 |
+| 声场与结果展示 | 查看声场热力图、峰值、空间 RMS、执行状态和分析报告 |
+| 成功技能库 | 浏览经过验证的固定配置，查看适用参数与证据，在新任务中检索和复用 |
+| 受控自动学习 | 首次求解后自动建立候选，经独立验证后接纳；后续任务重新执行并核验 |
+| 手动添加技能 | 按统一格式填写或导入JSON，预览代码差异、验证并接纳，编辑形成新版本 |
+| 自动纠错与经验缓存 | 追踪执行报错和修正过程，在后续适用任务中使用已有纠错经验 |
+| 执行看板 | 搜索历史任务，查看代码与报告，对比、导出记录，并在授权后重新执行 |
+| 自带模型 | 在门户接入自己的 OpenAI-compatible 模型，或用环境变量配置长期模型 profile |
+
+默认部署使用项目内的本地编排，无需安装 Dify；已有 Dify 的团队也可以启用兼容工作流。
+仿真在本机 Docker 沙箱内执行，模型请求发往你配置的模型服务。
+
+## 从问题到结果
+
+1. **描述问题**：输入介质、声源、频率、网格和结束时间等条件；缺少必要参数时补充说明。
+2. **检索与求解**：系统先检查参数并查找技能，再生成代码或交付适用的固定参考，送入隔离执行器。
+3. **检查结果**：执行反馈和确定性质量门共同检查结果，失败时在限额内修正；报告展示实际输出与检查结论。
+4. **继续探索**：在对话中调整参数，并用看板中的 `run_id` 回查本次运行。
+
+退出码为 0 不等于物理正确。技能的认证只对其精确配置生效，改变材料、频率或网格后需要重新验证。
+
+## 技能库覆盖
+
+当前内置 **17 项精确配置**，首次安装会在本机真实执行并验证后建立技能记录：
+
+| 类型 | 覆盖内容 |
+| --- | --- |
+| 平面波初压 | 均匀介质中的高斯初压传播 |
+| 界面反射与透射 | 两均匀半空间的法向入射 |
+| 周期模态（15 项） | 水、空气、软组织参数下的轴向、斜向、正交、谐波与拍频配置 |
+
+这 17 项是已验证的固定技能范围。其他声学任务由模型生成后尝试求解，其支持情况和精度需要按具体问题核验。
+普通成功运行最多积累为候选，不能自动当作可信技能；发行配置默认关闭自动学习。
+
+可选扩展支持 B01–B03 三项二维频域精确配置的自动学习与手动添加，认证范围为稳态幅值，不包括相位或任意参数泛化。
+按 [技能扩展启用指南](docs/skills-next/ENABLE_SKILLS.md) 完成备份、独立参考准备和开关设置后使用。
+负反馈或撤回会停止交付；重新接纳必须取得明确重验请求之后的新手动运行证据。
+
+## 快速开始
+
+需要 **Git、已启动的 Docker Compose**，以及自然语言仿真使用的模型 API 地址、模型名和 API Key。
+Windows 使用 Docker Desktop 的 **Linux 容器模式**；预构建求解器镜像当前面向 **linux/amd64**。
+首次安装需联网下载镜像和依赖。
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/MWXrookie/AcouAgent.git
+Set-Location AcouAgent
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
-dify-mcp :8001 (FastMCP 网关 + Web 门户)
-  ├── jwave-executor :8010 (隔离沙箱, 内网)
-  ├── Dify nginx :80 (工作流引擎)
-  └── DeepSeek API (纠错 + 代码修正)
-```
 
-两个容器：`dify-mcp` (Python 3.11-slim) + `jwave-executor` (Ubuntu 24.04, Conda jwave 0.2.1)。
-
-## 项目结构
-
-```text
-.
-├── app/                    # 网关运行代码
-│   ├── server_safe.py      # FastMCP 入口
-│   ├── tools.py            # MCP 仿真执行/纠错/校验工具
-│   ├── analysis.py         # 结果分析与物理语义门
-│   ├── static_check.py     # 生成代码 AST 静态检查
-│   ├── portal.py           # Web 路由
-│   └── web/                # 运行页面 HTML
-├── executor/               # Docker jwave 沙箱
-├── docs/                   # 项目文档、知识库、测试报告
-├── tests/                  # 单元与集成测试
-├── scripts/workflow/       # 历史 Dify 工作流生成/修补脚本
-├── scripts/tests/          # 本地回归与稳定性测试
-├── pyproject.toml          # Python 项目与测试工具配置
-├── requirements.lock.txt   # 运行时依赖
-├── Dockerfile
-├── compose.yaml
-└── auxiliary/              # 参考实现、插件测试、一次性试验，不参与部署
-```
-
-## 快速命令
+### Linux / WSL（amd64）
 
 ```bash
-cd <项目目录>                             # 按你的部署路径
-docker compose up -d --build          # 构建并启动
-docker compose ps                      # 查看状态
-docker restart docker-api-1 docker-worker-1  # MCP schema 刷新
+git clone https://github.com/MWXrookie/AcouAgent.git
+cd AcouAgent
+bash scripts/install.sh
 ```
 
-## Web 门户路由
+安装器生成本地凭据、构建网关，并等待 17 项固定技能自举完成。看到 `AcouAgent is ready` 后：
 
-| 路由 | 页面 | 功能 |
-|------|------|------|
-| `/` `/portal` | 门户首页 | 导航卡片 + **声学仿真问答**（自然语言输入→Markdown 报告） |
-| `/dashboard` | 执行看板 | 实时执行记录、代码展开、图像预览、清空历史 |
-| `/report` | 测试报告 | T-006 成功率、场景分类、失败分析、时间线 |
-| `/cache` | 纠错缓存 | 经验条目、命中率、置信度分布、高频经验 |
-| `/demo` | Demo 演示 | 6 个预设声学场景一键运行 |
-| `/health` | 健康检查 | 网关存活检测 |
+1. 打开 **[http://127.0.0.1:8001/portal](http://127.0.0.1:8001/portal)**。
+2. 在“模型设置”填写自己的 API 地址、模型名和 API Key，点击“测试连接”。
+3. 按 [第一次自然语言仿真](docs/FIRST_SIMULATION.md) 完成首题并保存 `run_id`。
 
-## API 端点
+临时模型配置默认 12 小时过期，重启网关后需要重新填写。
+长期配置、安装排错和数据备份见 [队友安装与更新](docs/TEAM_QUICKSTART.md) 与 [部署详解](deploy/README.md)。
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/ask` | POST | 门户问答代理 → Dify 工作流（返回 Markdown 报告） |
-| `/dashboard/api/executions` | GET | 执行历史（分页） |
-| `/dashboard/api/executions` | DELETE | 清空执行历史 |
-| `/dashboard/api/test_report` | GET | 最新测试报告 JSON |
-| `/dashboard/api/cache_stats` | GET | 纠错缓存统计 JSON |
-| `/demo/api/run` | POST | Demo 页代理 → Dify 工作流 |
+### 已有安装更新到 main
 
-## MCP 工具
+先保存自己的未提交改动；需要保留的数据请先备份。仓库改名前已有的本地目录可以继续使用。
 
-网关共注册 **6 个 MCP 工具**（FastMCP 3.4.6，入口薄壳 `app/server_safe.py` + 模块 `app/tools.py`/`app/portal.py`/`app/analysis.py`）：
-
-| 工具 | 说明 |
-|------|------|
-| `run_jwave_code` | 执行 Python 代码（1-30s 超时, 20KB 上限） |
-| `run_jwave_code_with_retry` | 沙箱执行 + DeepSeek 自动纠错 + 重试（≤7 次）+ **自动生成 Markdown 报告**；物理结果由独立分析工具判定 |
-| `validate_simulation_params` | 硬编码物理规则校验（Nyquist/CFL/网格/PML） |
-| `jwave_environment` | 执行器环境健康检查 |
-| `list_installed_libraries` | 已安装工具列表 |
-
-## MCP 调用方式
-
-- 端点：`POST http://192.168.30.200:8001/mcp`（`path=/mcp`，stateless HTTP 模式）
-- 认证：`Authorization: Bearer <MCP_AUTH_TOKEN>`
-- **必须带** `Accept: application/json, text/event-stream`，否则返回 **406 Not Acceptable**
-- 示例（initialize）：
-
-```bash
-curl -X POST http://192.168.30.200:8001/mcp \
-  -H "Authorization: Bearer $MCP_AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cli","version":"1.0"}}}'
+```powershell
+git remote set-url origin https://github.com/MWXrookie/AcouAgent.git
+git switch main
+git pull --ff-only origin main
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1
 ```
 
-> ⚠️ `:8001` 只绑定到 `192.168.30.200`，**`127.0.0.1` 连不上**（健康检查需用局域网 IP）。
+Linux / WSL 将最后一行换成 `bash scripts/install.sh`。
+**拉取代码后还要运行安装器重建容器**，运行中的旧容器不会随 `git pull` 自动更新。
+已有 `.env` 和持久数据卷会保留；不要通过删除数据卷来更新版本。
 
-## 数据存储
+## 页面入口
 
-- SQLite `/app/data/execution_history.db` — 执行记录（数据卷 `dify-mcp-server_dify_mcp_data` 持久化）
-- SQLite `/app/data/error_cache.db` — 纠错经验缓存（同卷持久化）
-- 测试报告 `docs/test_results_raw*.json` — 通过 docs 目录挂载自动同步
+| 页面 | 地址 |
+| --- | --- |
+| 仿真对话 | `/portal` |
+| 技能库 | `/skills` |
+| 执行看板 | `/dashboard` |
+| 纠错缓存 | `/cache` |
 
-## 测试
+新安装使用自己的本地数据库，不会包含其他人的执行历史或纠错缓存。
 
-| 脚本 | 用途 | ⚠️ 注意 |
-|------|------|---------|
-| `scripts/tests/run_50_tests_new.py` | 50 次端到端回归（真实调用 Dify 工作流 + DeepSeek） | **有模型费用**，运行前先确认 |
-| `scripts/tests/retest_p0.py` | P0 重点场景小批量重测 | 费用低 |
+## 当前版本
 
-- 测试目标：`http://localhost/v1/workflows/run`，需要 `DIFY_API_KEY` 环境变量
-- 语法预检：`python3 -m py_compile app/server_safe.py app/tools.py app/portal.py app/analysis.py app/static_check.py app/cache_store.py app/execution.py app/llm.py app/config.py app/dashboard.py executor/executor.py`
-- 单元测试：`python3 -m pytest tests/unit`
-- 集成测试：`GW_BASE_URL=http://<gateway> python3 -m pytest tests/integration`
-- 现有报告：`docs/test_report_phase1_new.md`（48/50=96%）、`docs/test_report_10.md`（10/10=100%）
+当前为 **0.1.0 测试版**，适合团队试用、课程演示与有参考答案的算例验证。
+已建立自动化回归、干净安装检查、固定技能物理校验，以及门户技能复用、纠错缓存和看板的真实交互验收记录。
 
-## Dify 工作流配置
+正式 v1.0 仍需完成多模型固定题集、本地与 Dify 同题对照、新操作者真实 BYOK 首题及完整升级回滚验收。
+复杂三维模型、论文算例和任意自然语言需求不保证一次求解成功；请结合原始参数、数值答案和误差标准验证。
+最新证据和未关闭事项统一见 [当前状态](docs/CURRENT_STATUS.md)。
 
-- MCP URL: `http://dify-mcp:8001/mcp`
-- Auth: `Authorization: Bearer <MCP_AUTH_TOKEN>`
-- SSRF 白名单: `SSRF_PROXY_ALLOW_PRIVATE_DOMAINS=dify-mcp`
-- 工作流链路（9 节点）：Start → 需求分析 → 知识检索 → 模板转换 → 参数提取 → **参数校验（validate_simulation_params，T-005 新增）** → 代码生成 → MCP retry → **代码节点**（提取 report 字段）→ 结束节点输出 Markdown
+## 进一步了解
 
-### 代码节点配置
+- [队友安装与更新](docs/TEAM_QUICKSTART.md)：首次部署、更新 main、环境检查与常见问题
+- [模型配置](docs/MODEL_PROFILES.md)：临时 BYOK、长期 profile 和模型服务设置
+- [技术与部署详解](docs/TECHNICAL_GUIDE.md)：安全边界、MCP 工具、存储、技能质量与 Dify 接线
+- [变更日志](docs/CHANGELOG.md)：功能演进与验证记录
+- [开发与提交规范](AGENTS.md)：面向项目维护者的协作入口
 
-```python
-import json
-
-def main(mcp_json):
-    data = mcp_json
-    if isinstance(data, list) and len(data) > 0:
-        data = data[0]
-    if isinstance(data, str):
-        try:
-            data = json.loads(data)
-        except Exception:
-            return {"result": data}
-    if not isinstance(data, dict):
-        return {"result": str(data)}
-    report = data.get("report", "")
-    if report:
-        return {"result": report}
-    return {"result": json.dumps(data, ensure_ascii=False, indent=2)}
-```
-
-输出变量：`result`。结束节点引用：`{{代码节点.result}}`。
-
-## 当前状态（2026-08-17 实测）
-
-- 所有路由 200 OK
-- Dify 工作流通畅，返回 Markdown 报告
-- 门户问答功能正常
-- T-006 最终测试：**50 次, 48 成功, 96.0%**（≥90% 门禁通过）
-- **阶段一已正式关闭**（`phase-1-complete` tag，2026-08-17）
-- 纠错缓存：12 条经验, 27 次命中, 88.9% 成功率
-- 执行看板：31 条记录, 30 成功, 1 失败
-- 看板图像列已修复（每个仿真独立保存图片）
-- 缓存置信度逻辑已修复（正确升降级+退役机制）
-- 执行看板已精简为 5 列（去掉工具列, 代码摘要智能跳过 import）
-- P1 已修复（2026-08-17）：`.env` 中 `MCP_AUTH_TOKEN`/`MCP_EXTRA_MODULES` 重复行已去重并重建容器
-- 遗留：P2「2D均质初始压力」成功率 80%（阶段一测试中 2 次失败，待修）
-
-## 环境变量
-
-```bash
-MCP_AUTH_TOKEN=<32+ 字符>          # MCP 网关 Bearer token（必填）
-EXECUTOR_SHARED_TOKEN=<32+ 字符>   # 网关↔执行器内部认证（必填）
-DEEPSEEK_API_KEY=sk-...            # 自动纠错用（可选，缺省时 retry 工具报错）
-DEEPSEEK_MODEL=deepseek-chat
-CODE_RETRY_MAX=7                   # 自动纠错重试上限
-DIFY_API_KEY=app-...               # Dify App API Key（门户 /ask 代理用）
-```
-
-> 完整变量清单见 `.env.example`。新环境从 `cp .env.example .env` 起步，真实密钥由项目 Owner 私发，**不得提交到 git**。
-
-## 备份
-
-```bash
-# 备份目录在 Owner 本地/VM（.claude 为本地工具目录，不入仓库）
-```
-
-## 关键技术细节
-
-- jwave 0.2.1 正确 API（非 LLM 编造）: `TimeAxis.from_medium()`, `.to_array()`, `FourierSeries(data, domain)`, `Sources(positions, signals, dt, domain)`
-- 代码自动修正: `.max()` → `jnp.max(jnp.abs())`, `.params[0]` → `.params`, `plt.savefig('/tmp/result.png')` → `plt.savefig('result.png')`
-- Executor 沙箱: read_only rootfs, cap_drop ALL, no-new-privileges, pids_limit 256, mem_limit 4g, tmpfs /tmp
-
-## 协作开发
-
-仓库：`github.com/MWXrookie/dify-mcp-server`（公开，分支 `main`）
-
-- **代码真正运行在 VM**（`~/dify-mcp-server`），GitHub 只是代码中转：合并后需在 VM 上 `git pull` → `docker compose up -d --build` 才生效
-- 提交信息/分支/PR 规范见 **`docs/COMMIT_CONVENTION.md`**（**每次提交前必读**：提交格式 + 密钥红线/可移植性/验证要求检查清单）
-- 红线：`.env` 及 `.env.bak.*` 密钥备份、`*.log`、`jwave-env.tar.gz`（268MB）、`__pycache__/` 一律不提交
-- 环境变量：`cp .env.example .env` 起步，真实密钥由 Owner 私发
-- 项目约束（jwave 0.2.1 锁定、沙箱安全限制不可削弱等）见 `docs/AGENTS.md` 第 4 节
+AcouAgent 基于 jwave、FastMCP、SQLite 和可选 Dify 构建，借鉴技能检索与反馈学习方法，
+不宣称原创声学求解算法。

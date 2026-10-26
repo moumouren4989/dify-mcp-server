@@ -1,23 +1,49 @@
-"""DeepSeek 自动纠错：根据执行失败结果调用 LLM 返回修正代码。"""
+"""模型无关的自动纠错：根据执行失败结果返回修正代码。"""
 
+import asyncio
+import sqlite3
 from typing import Any
 
-import httpx
-
-from app import cache_store, config, dashboard
+from app import cache_store, model_client
 
 
-def _llm_fix_code(api_key: str, model: str, code: str, result: dict[str, Any]) -> str:
-    """调用 DeepSeek API 修正出错的代码，返回修正后的代码字符串."""
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY must be set to use auto-fix")
+_CACHE_LOOKUP_UNSET = object()
 
-    # ---- 提取错误签名，查缓存 ----
+
+def _safe_query_cache(error_signature: str | None) -> dict | None:
+    """Treat an unavailable auxiliary cache as a cache miss."""
+    if not error_signature:
+        return None
+    try:
+        return cache_store._query_cache(error_signature)
+    except (OSError, sqlite3.Error):
+        return None
+
+
+def _truncate_utf8(value: object, limit: int, *, keep_tail: bool = False) -> str:
+    """Return a UTF-8 byte-bounded string without splitting a code point."""
+    text = value if isinstance(value, str) else str(value or "")
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    bounded = encoded[-limit:] if keep_tail else encoded[:limit]
+    return bounded.decode("utf-8", errors="ignore")
+
+
+def _fix_prompt(
+    code: str,
+    result: dict[str, Any],
+    requirements_context: str = "",
+    *,
+    cache_hint: object = _CACHE_LOOKUP_UNSET,
+) -> tuple[str, str | None]:
+    """Build one bounded retry prompt and return its cache signature."""
     stderr = result.get("stderr", "")
     stdout = result.get("stdout", "")
     exit_code = result.get("exit_code")
     error_sig = cache_store._extract_error_signature(stderr, exit_code, stdout)
-    cache_hint = cache_store._query_cache(error_sig) if error_sig else None
+    if cache_hint is _CACHE_LOOKUP_UNSET:
+        cache_hint = _safe_query_cache(error_sig)
 
     prompt = (
         "You are a Python debugging assistant. The following Python code was executed "
@@ -26,13 +52,18 @@ def _llm_fix_code(api_key: str, model: str, code: str, result: dict[str, Any]) -
         "corrected Python code. No markdown fences, no explanations — just raw, "
         "runnable Python.\n\n"
     )
+    if requirements_context:
+        prompt += (
+            "REQUIREMENTS THAT MUST BE PRESERVED:\n"
+            + _truncate_utf8(requirements_context, 16000)
+            + "\n\n"
+        )
 
-    # ---- 注入缓存建议 ----
     if cache_hint:
         prompt += (
             "**KNOWN FIX EXPERIENCE** (confidence: {:.0f}%): {}"
             " If applicable, apply this fix directly.\n\n"
-        ).format(cache_hint['confidence'] * 100, cache_hint['fix_hint'])
+        ).format(cache_hint["confidence"] * 100, cache_hint["fix_hint"])
     else:
         prompt += (
             "**jwave common error cheat sheet (match by error message)**:\n"
@@ -55,12 +86,12 @@ def _llm_fix_code(api_key: str, model: str, code: str, result: dict[str, Any]) -
             "and NOT create Sources. Putting the Gaussian pressure into Sources() will produce zero output because Sources "
             "expects time-domain signals at point positions, not spatial pressure distributions. "
             "Fix: remove Sources entirely, create p0=FourierSeries(pressure_array, domain), then call "
-            "simulate_wave_propagation with p0=p0 (no u0!). Use jnp.linspace + jnp.meshgrid to build the grid coordinates.\n"
+            "simulate_wave_propagation with p0=p0 (no u0!). Use jnp.arange(N)*dx + jnp.meshgrid for grid coordinates; exclude the right endpoint.\n"
             "- **CRITICAL - wrong argument name for initial pressure**: the ONLY valid kwarg is p0. "
             "simulate_wave_propagation does NOT accept initial_pressure=, initi..., pressure_0=, or p0_field=. "
             "TypeError like 'unexpected keyword argument' → rename to p0.\n"
             "- **CRITICAL - ring/ellipse p0 geometry**: build the ring with meshgrid coordinates:\n"
-            "  x = jnp.linspace(0, Nx*dx, Nx); y = jnp.linspace(0, Ny*dx, Ny); XX, YY = jnp.meshgrid(x, y, indexing='ij')\n"
+            "  x = jnp.arange(Nx)*dx; y = jnp.arange(Ny)*dx; XX, YY = jnp.meshgrid(x, y, indexing='ij')\n"
             "  r = jnp.sqrt((XX-cx)**2 + (YY-cy)**2)\n"
             "  ring: p0_grid = A*jnp.exp(-((r-R0)**2)/(2*sigma**2))  (R0=ring radius)\n"
             "  ellipse: p0_grid = A*jnp.exp(-(((XX-cx)/a)**2 + ((YY-cy)/b)**2) / 2)\n"
@@ -77,39 +108,16 @@ def _llm_fix_code(api_key: str, model: str, code: str, result: dict[str, Any]) -
         "EXECUTION RESULT:\n"
         f"- exit_code: {result.get('exit_code')}\n"
         f"- timed_out: {result.get('timed_out')}\n"
-        f"- stdout (last 3000 chars):\n{result.get('stdout', '')[-3000:]}\n"
-        f"- stderr (last 3000 chars):\n{result.get('stderr', '')[-3000:]}\n"
+        f"- stdout (bounded tail):\n{_truncate_utf8(result.get('stdout', ''), 12000, keep_tail=True)}\n"
+        f"- stderr (bounded tail):\n{_truncate_utf8(result.get('stderr', ''), 12000, keep_tail=True)}\n"
         "\nFAILED CODE:\n"
-        f"```python\n{code}\n```\n"
+        f"```python\n{_truncate_utf8(code, 20000)}\n```\n"
         "\nReturn ONLY the fixed Python code:"
     )
+    return prompt, error_sig
 
-    llm_response = httpx.post(
-        "https://api.deepseek.com/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.1,
-            "max_tokens": 8000,
-        },
-        timeout=60,
-    )
-    llm_response.raise_for_status()
-    data = llm_response.json()
-    fixed = data["choices"][0]["message"]["content"].strip()
 
-    # 记录 token 用量与成本（费用看板）
-    try:
-        usage = data.get("usage")
-        dashboard.record_llm_usage(model, usage, config.calc_llm_cost(usage))
-    except Exception:
-        pass
-
-    # 去掉可能的 markdown 代码块标记
+def _clean_fixed_code(fixed: str) -> str:
     for prefix in ("```python\n", "```python", "```\n", "```"):
         if fixed.startswith(prefix):
             fixed = fixed[len(prefix):]
@@ -117,6 +125,50 @@ def _llm_fix_code(api_key: str, model: str, code: str, result: dict[str, Any]) -
         fixed = fixed[:-4]
     elif fixed.endswith("```"):
         fixed = fixed[:-3]
-    fixed = fixed.strip()
+    return fixed.strip()
 
-    return fixed
+
+def _llm_fix_code(
+    profile_id: str | None, code: str, result: dict[str, Any], run_id: str | None = None
+) -> str:
+    """Synchronous retry entry retained for MCP tool callers."""
+    prompt, _ = _fix_prompt(code, result)
+    fixed = model_client.complete_sync(
+        profile_id,
+        "retry",
+        [{"role": "user", "content": prompt}],
+        run_id=run_id,
+    )["content"]
+    return _clean_fixed_code(fixed)
+
+
+async def fix_code(
+    profile_id: str | None,
+    code: str,
+    result: dict[str, Any],
+    *,
+    run_id: str | None = None,
+    requirements_context: str = "",
+) -> dict[str, Any]:
+    """Async retry entry for local orchestration, including cache lookup metadata."""
+    error_signature = cache_store._extract_error_signature(
+        result.get("stderr", ""), result.get("exit_code"), result.get("stdout", "")
+    )
+    cache_hint = await asyncio.to_thread(_safe_query_cache, error_signature)
+    prompt, error_signature = _fix_prompt(
+        code,
+        result,
+        requirements_context,
+        cache_hint=cache_hint,
+    )
+    response = await model_client.complete(
+        profile_id,
+        "retry",
+        [{"role": "user", "content": prompt}],
+        run_id=run_id,
+    )
+    return {
+        "code": _clean_fixed_code(response["content"]),
+        "error_signature": error_signature,
+        "cache_hit": cache_hint is not None,
+    }

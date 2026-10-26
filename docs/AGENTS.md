@@ -1,4 +1,14 @@
+> 2026-10-26 主线交付完成：PR37已合入main（698a4f9），正式与演示各161运行文件一致；三库在线备份、升级→回退→再升级通过，executor未重启，原849条逐行保留。正式浏览器新增1次成功、同run看板850；演示纯中文频域新求解Q4（仅幅值）。2131回归、120条模型合同/80次新求解复核及CI通过。队友可按TEAM_QUICKSTART拉main并安装，扩展默认关闭。完整v1.0仍需真人冷启动、独立Luna复核及Owner授权。权威状态见docs/CURRENT_STATUS.md，证据见docs/validation/stage7/PRODUCTION_MODEL_COMPAT_2026-10-26.md。以下较早日期段落均为历史进度，不覆盖本条。
+
+> 2026-10-26 最新模型合同技术验收：120条完整、80次真实新求解来源复核、无合同差异，2131回归与五CI通过；隔离故障演练与凭据清理完成。PR37合并和正式部署另记，仍不宣布v1.0。详见validation/stage7/MODEL_COMPATIBILITY_2026-10-26.md。
+
+> 2026-10-26 最新候选2130回归通过：64节点Dify缺参阻断已真实通过；69节点候选补齐模型异常的显式参数续行及说明不可用提示，完整复验尚待进行。原发布图/模型不可用批次保留，main仍630c2f9，不能提前关闭完整门。
+
+> 2026-10-26 阶段七：本地Chat/Reasoner/Pro各30记录通过原合同门；Reasoner提取不可用8次单列。原Dify19/20正例、缺参0/5保护，完整门未过；共享原始初压守卫候选2078回归通过、发布待实跑。main/正式630c2f9，PR37草稿，不能提前宣布阶段七/v1.0。
+
 # AGENTS.md — AcouAgent 项目指令手册
+
+> 2026-10-16 当前状态：发行默认使用本地编排，门户和环境变量均支持用户自带 OpenAI-compatible 模型；模型调用统一通过 `app/model_client.py` 的脱敏受限传输，自动纠错不再维护平行 HTTP 实现。阶段七 Dify 固定集已完成 30/30，两个本地 BYOK lane、全新机器自然语言首题和 VM 回滚终验仍未关闭；不得把部分矩阵写成完整 v1.0 发布。权威状态入口为 `docs/CURRENT_STATUS.md`。
 
 > 本文档面向项目中的所有 AI Agent。Agent 在执行任何任务之前，必须先阅读本文档以获取项目上下文、当前状态和可执行任务。
 
@@ -6,7 +16,12 @@
 
 > 📏 **每次提交前必读**：`docs/COMMIT_CONVENTION.md`（提交信息格式 + 检查清单：密钥红线/可移植性/验证要求）。不遵守规范 = 提交被拒。
 
+> 2026-10-11 当前代码范围：schema17、9工具、两项精确本机基础技能；人工接纳/实际参考执行可用，学习默认关闭、Dify草稿未发布、整体合同未通过。最新使用以根 README 和验收矩阵为准。
+
 ---
+
+> ⚠️ **2026-10-07 起**：开发规划以 **`docs/DEVELOPMENT_PLAN.md` v3.0** 为准（终点＝"下载即用"的本地技能库系统），验收依据见 `docs/SKILL_LIBRARY_ACCEPTANCE.md`。
+> 本文档第 2 节「当前状态」与第 3 节「任务队列」是 **2026-08 的历史快照，已过期**（如"34 次测试 76%""8 节点 draft""5 个 MCP 工具"），仅作历史参考；v2.1 规划全文已归档于 `docs/archive/DEVELOPMENT_PLAN_v2.1.md`。
 
 ## 0. 项目记忆
 
@@ -103,7 +118,7 @@ acouagent,dify-mcp-server,architecture,optimization
 | `app/config.py` | ~30 | 环境配置与校验 | 低 |
 | `app/cache_store.py` | ~200 | 纠错经验缓存 SQLite | 中 |
 | `app/execution.py` | ~150 | 代码清理/沙箱执行/报告生成 | 中 |
-| `app/llm.py` | ~100 | DeepSeek 自动纠错 | 低 |
+| `app/llm.py` | ~130 | BYOK profile 自动纠错 | 低 |
 | `app/tools.py` | ~330 | MCP 工具集（6 个） | 中（新增工具时） |
 | `app/portal.py` | ~170 | Web 门户路由 | 中 |
 | `app/analysis.py` | 占位 | 结果分析（T-007 落点） | 中（T-007 后） |
@@ -235,7 +250,7 @@ Agent 应**按编号顺序**领取任务。每完成一个任务，在 `docs/CHA
 | 验收 | 使用标准点源模板代码执行，max_pressure > 0 |
 
 **执行步骤**：
-1. 在 executor 容器中直接执行 jwave 源码检查：`docker exec jwave-executor /opt/jwave/bin/python -c "from jwave.geometry import Sources; help(Sources.__init__)"`
+1. 在 executor 容器中直接执行 jwave 源码检查：`docker exec jwave-executor python -c "from jwave.geometry import Sources; help(Sources.__init__)"`
 2. 读 jwave 源码中 `Sources.on_grid()` 的实现，确认 source term 如何注入 time stepping
 3. 写一个最小复现脚本，对比 Sources 方式 vs p0 方式的差异
 4. 如果 Sources 本身有问题，输出 workaround 方案；如果是用法问题，更新知识库

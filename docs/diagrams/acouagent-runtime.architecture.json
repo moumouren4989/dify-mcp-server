@@ -6,31 +6,75 @@
     "locale": "zh-CN",
     "output": "docs/diagrams/acouagent-runtime.architecture.html",
     "quality_profile": "showcase",
-    "viewBox": [1380, 660],
+    "legend": {
+      "mode": "hidden"
+    },
+    "viewBox": [
+      1240,
+      680
+    ],
     "views": [
       {
         "id": "main-request",
         "label": "主请求链路",
-        "focus": ["users", "web_portal", "dify_workflow", "mcp_gateway", "simulation_pipeline"],
-        "note": "自然语言请求从 Web 门户进入 Dify，再由 MCP 工具触发仿真执行闭环。 仓库结果契约v2区分窗口峰值与稳态、检查传感器到达时间；当前Dify图未核验，脚本未发布。"
+        "focus": [
+          "users",
+          "web_portal",
+          "model_preflight",
+          "local_orchestrator",
+          "mcp_gateway",
+          "simulation_pipeline"
+        ],
+        "note": "门户预检模型能力，按激励合同保留完整物理输入。复制的高斯/模态初压及完整频域声明按用户原始字段校验，模型遗漏不得丢失边界、材料、单位或结果合同。检索、沙箱和确定性物理门独立核验；实际复用绑定本次新运行；固定双传感器结果显示时间波形与采样统计，不冒充二维场或全场峰值。"
       },
       {
         "id": "quality-loop",
         "label": "执行与质量闭环",
-        "focus": ["mcp_gateway", "simulation_pipeline", "jwave_sandbox", "deepseek_api", "state_store"],
-        "note": "参数校验、静态检查、沙箱执行、自动纠错、物理 verdict 与经验缓存形成闭环。"
-      },
-      {
-        "id": "knowledge-path",
-        "label": "知识检索",
-        "focus": ["dify_workflow", "dify_kb", "simulation_pipeline"],
-        "note": "Dify 知识库提供 jwave API、物理规则和仿真模板上下文。"
+        "focus": [
+          "local_orchestrator",
+          "mcp_gateway",
+          "simulation_pipeline",
+          "jwave_sandbox",
+          "model_provider",
+          "state_store"
+        ],
+        "note": "Dify先用共享校验器校验原始初压，失败即停。提取失败仅可按已校验的用户显式声明继续，不补参；报告标记可用性，说明失败保留真实物理结论。无完整声明仍失败；Reasoner低强度有界预算、截断拒绝，按run_id有界回查。"
       },
       {
         "id": "isolation-boundary",
         "label": "隔离边界",
-        "focus": ["mcp_gateway", "simulation_pipeline", "jwave_sandbox"],
-        "note": "执行器仅连接内部网络，代码在只读、降权和资源受限的沙箱内运行。"
+        "focus": [
+          "mcp_gateway",
+          "simulation_pipeline",
+          "jwave_sandbox"
+        ],
+        "note": "固定平面波只保留物理门需要的 352×320 网格、24µs 和双探针窗口；executor 仍固定 2 线程并受 2 CPU、30 秒墙钟和累计 CPU 限额约束。PID 1 回收后代树；只读、降权、无外网不变。"
+      },
+      {
+        "id": "skill-workbench",
+        "label": "技能库工作台",
+        "focus": [
+          "users",
+          "web_portal",
+          "local_orchestrator",
+          "state_store",
+          "simulation_pipeline"
+        ],
+        "note": "管理员导入/编辑、查看差异、验证并接纳；trial不授级，历史评级与当前许可分开。自动来源独立验证后接纳。负反馈即停用，显式重验后的新手动证明才能恢复；单slot，未知不重派。"
+      },
+      {
+        "id": "fresh-install",
+        "label": "冷启动与发布检查",
+        "focus": [
+          "release_doctor",
+          "web_portal",
+          "model_preflight",
+          "model_provider",
+          "mcp_gateway",
+          "skill_bootstrap",
+          "jwave_sandbox"
+        ],
+        "note": "先Doctor与BYOK连接预检；可选技能扩展须显式备份三库，核对固定参考双摘要和真实运行时后准备18，再设置开关。参考不进入executor；完整安装由实际验收矩阵确认。"
       }
     ]
   },
@@ -38,99 +82,216 @@
     {
       "id": "users",
       "type": "external",
-      "label": "用户 / Dify Chat",
+      "label": "用户 / API 客户端",
       "sublabel": "自然语言声学需求",
-      "pos": [40, 280],
-      "size": [120, 64]
+      "pos": [
+        20,
+        300
+      ],
+      "size": [
+        120,
+        64
+      ]
     },
     {
       "id": "web_portal",
       "type": "frontend",
       "label": "Web 门户",
-      "sublabel": "问答 / 看板 / Demo",
-      "pos": [200, 280],
-      "size": [140, 64],
+      "sublabel": "聊天 / 技能编辑 / 验证结果",
+      "pos": [
+        170,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ],
       "tag": "FastMCP Web"
+    },
+    {
+      "id": "local_orchestrator",
+      "type": "backend",
+      "label": "本地编排器",
+      "sublabel": "提取 / 检索 / 生成 / 缓存纠错 / 解读",
+      "pos": [
+        390,
+        300
+      ],
+      "size": [
+        185,
+        76
+      ],
+      "tag": "阶段六 · 可切换 profile"
     },
     {
       "id": "dify_workflow",
       "type": "cloud",
-      "label": "Dify 工作流",
-      "sublabel": "需求分析 / 参数提取 / 代码生成",
-      "pos": [480, 280],
-      "size": [180, 76],
-      "tag": "编排层"
+      "label": "Dify 兼容工作流",
+      "sublabel": "原始声明守卫 / 69 节点",
+      "pos": [
+        150,
+        570
+      ],
+      "size": [
+        185,
+        64
+      ],
+      "tag": "可选兼容"
     },
     {
-      "id": "dify_kb",
-      "type": "database",
-      "label": "Dify 知识库",
-      "sublabel": "API / 物理规则 / 模板",
-      "pos": [480, 80],
-      "size": [180, 64],
-      "tag": "向量检索"
+      "id": "model_preflight",
+      "type": "security",
+      "label": "模型连接预检",
+      "sublabel": "双任务解析 / 严格 JSON / AST 白名单",
+      "pos": [
+        390,
+        100
+      ],
+      "size": [
+        185,
+        64
+      ],
+      "tag": "不执行代码 · 不入技能库"
+    },
+    {
+      "id": "model_provider",
+      "type": "cloud",
+      "label": "用户 BYOK 模型",
+      "sublabel": "提取 / 生成 / 审查 / 解释 / 重试",
+      "pos": [
+        630,
+        70
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "tag": "临时会话 / 环境 profile"
+    },
+    {
+      "id": "release_doctor",
+      "type": "backend",
+      "label": "发布 Doctor",
+      "sublabel": "配置 / Compose / 运行态 / 安全边界",
+      "pos": [
+        390,
+        570
+      ],
+      "size": [
+        185,
+        64
+      ],
+      "tag": "脱敏诊断 · prepare/runtime"
     },
     {
       "id": "mcp_gateway",
       "type": "security",
       "label": "FastMCP 网关",
-      "sublabel": "鉴权 / 工具注册 / 报告",
-      "pos": [740, 280],
-      "size": [170, 76],
-      "tag": "6 个 MCP 工具"
+      "sublabel": "鉴权 / 技能读工具 / 执行报告",
+      "pos": [
+        630,
+        300
+      ],
+      "size": [
+        170,
+        76
+      ],
+      "tag": "9 个 MCP 工具"
+    },
+    {
+      "id": "skill_bootstrap",
+      "type": "backend",
+      "label": "固定技能自举",
+      "sublabel": "17 配方 / executor 实跑 / 物理门",
+      "pos": [
+        630,
+        570
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "tag": "新数据卷 · 幂等"
     },
     {
       "id": "simulation_pipeline",
       "type": "backend",
       "label": "仿真执行闭环",
-      "sublabel": "校验 / 执行 / 纠错 / 统一制图",
-      "pos": [950, 280],
-      "size": [170, 76],
-      "tag": "≤ 7 次重试"
+      "sublabel": "检索 / 沙箱执行 / Q2-Q4 门 / 回退",
+      "pos": [
+        840,
+        300
+      ],
+      "size": [
+        170,
+        76
+      ],
+      "tag": "物理通过才成功"
     },
     {
       "id": "state_store",
       "type": "database",
       "label": "本地数据卷",
-      "sublabel": "执行历史 / 纠错缓存",
-      "pos": [950, 520],
-      "size": [170, 64],
-      "tag": "SQLite"
+      "sublabel": "技能 / 验证任务 / 完整结果",
+      "pos": [
+        840,
+        570
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "tag": "SQLite · 默认17 / 显式扩展18"
     },
     {
       "id": "jwave_sandbox",
       "type": "security",
       "label": "jwave 沙箱",
-      "sublabel": "Python / jwave 0.2.1 / CPU",
-      "pos": [1160, 520],
-      "size": [170, 76],
-      "tag": "无外网 + 资源限额"
-    },
-    {
-      "id": "deepseek_api",
-      "type": "cloud",
-      "label": "DeepSeek API",
-      "sublabel": "错误诊断 / 代码修复",
-      "pos": [950, 80],
-      "size": [170, 64],
-      "tag": "自动纠错"
+      "sublabel": "Python / jwave 0.2.1 / 2核 Eigen",
+      "pos": [
+        1040,
+        570
+      ],
+      "size": [
+        170,
+        76
+      ],
+      "tag": "无外网 + 30s墙钟/2 CPU"
     }
   ],
   "boundaries": [
     {
       "kind": "region",
-      "label": "Dify 编排层",
-      "wraps": ["dify_workflow", "dify_kb"]
+      "label": "Dify 兼容编排层（可选）",
+      "wraps": [
+        "dify_workflow"
+      ]
     },
     {
       "kind": "region",
       "label": "dify-mcp 服务",
-      "wraps": ["mcp_gateway", "simulation_pipeline", "state_store"]
+      "wraps": [
+        "local_orchestrator",
+        "mcp_gateway",
+        "simulation_pipeline",
+        "state_store",
+        "skill_bootstrap",
+        "model_preflight"
+      ]
     },
     {
       "kind": "security-group",
       "label": "隔离执行边界",
-      "wraps": ["jwave_sandbox"]
+      "wraps": [
+        "jwave_sandbox"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "安装与发布诊断",
+      "wraps": [
+        "release_doctor"
+      ]
     }
   ],
   "connections": [
@@ -139,57 +300,115 @@
       "from": "users",
       "to": "web_portal",
       "label": "HTTP",
-      "labelDy": 68,
+      "variant": "emphasis"
+    },
+    {
+      "id": "portal-to-local",
+      "from": "web_portal",
+      "to": "local_orchestrator",
+      "label": "默认本地编排",
+      "labelAt": [
+        300,
+        390
+      ],
       "variant": "emphasis"
     },
     {
       "id": "portal-to-dify",
       "from": "web_portal",
       "to": "dify_workflow",
-      "label": "Dify Chat API"
+      "label": "可选 SSE 工作流 API",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "variant": "dashed"
     },
     {
-      "id": "kb-to-dify",
-      "from": "dify_kb",
-      "to": "dify_workflow",
-      "label": "top-k 上下文",
-      "labelDy": 24
+      "id": "portal-to-preflight",
+      "from": "web_portal",
+      "to": "model_preflight",
+      "label": "POST 连接测试",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "preflight-to-model",
+      "from": "model_preflight",
+      "to": "model_provider",
+      "label": "一次受限探测",
+      "variant": "emphasis",
+      "labelAt": [
+        603,
+        178
+      ]
+    },
+    {
+      "id": "local-to-model",
+      "from": "local_orchestrator",
+      "to": "model_provider",
+      "label": "BYOK / 环境 profile",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "local-to-mcp",
+      "from": "local_orchestrator",
+      "to": "mcp_gateway",
+      "label": "共享校验与执行入口",
+      "labelAt": [
+        600,
+        278
+      ],
+      "variant": "emphasis"
     },
     {
       "id": "dify-to-mcp",
       "from": "dify_workflow",
       "to": "mcp_gateway",
       "label": "MCP tool call",
-      "variant": "emphasis"
+      "fromSide": "right",
+      "toSide": "bottom"
     },
     {
       "id": "mcp-to-pipeline",
       "from": "mcp_gateway",
-      "to": "simulation_pipeline",
-      "label": "执行",
-      "labelDy": 62
+      "to": "simulation_pipeline"
     },
     {
       "id": "pipeline-to-sandbox",
       "from": "simulation_pipeline",
       "to": "jwave_sandbox",
       "label": "POST /execute",
-      "labelDy": 62,
       "variant": "emphasis"
-    },
-    {
-      "id": "pipeline-to-deepseek",
-      "from": "simulation_pipeline",
-      "to": "deepseek_api",
-      "label": "失败纠错",
-      "variant": "security"
     },
     {
       "id": "pipeline-to-state",
       "from": "simulation_pipeline",
       "to": "state_store",
-      "label": "历史 + 经验",
-      "labelDy": 24
+      "label": "执行历史 + 分析摘要 + 纠错经验 + 学习",
+      "labelAt": [
+        925,
+        400
+      ]
+    },
+    {
+      "id": "bootstrap-to-pipeline",
+      "from": "skill_bootstrap",
+      "to": "simulation_pipeline",
+      "label": "固定配方实跑与接纳",
+      "variant": "emphasis"
+    },
+    {
+      "id": "doctor-to-mcp",
+      "from": "release_doctor",
+      "to": "mcp_gateway",
+      "label": "技能 / 审计 / 备份检查",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelAt": [
+        600,
+        500
+      ]
     }
   ],
   "cards": [
@@ -197,29 +416,29 @@
       "dot": "cyan",
       "title": "入口与编排",
       "items": [
-        "Web 门户提供问答、执行看板、报告、缓存和 Demo",
-        "Dify 负责需求分析、参数提取、知识检索和代码生成",
-        "工作流通过 MCP 工具调用执行仿真"
+        "发行默认 local；Dify 仅为显式兼容覆盖",
+        "门户密钥仅存网关内存；连接预检不回显模型正文或可重放会话",
+        "本地模式覆盖提取、检索、生成、缓存纠错、执行、审查和解释"
       ]
     },
     {
       "dot": "emerald",
-      "title": "MCP 与质量门",
+      "title": "执行与物理质量门",
       "items": [
-        "网关注册 6 个 MCP 工具并校验 Bearer Token",
-        "执行前做 AST 静态检查和物理参数校验",
-        "标准化场数据和传感器时序由网关统一生成热力图与波形图",
-        "VAL-1 verdict、热力图和传感器波形组成物理质量门",
-        "执行记录与纠错经验写入 SQLite 数据卷"
+        "生成代码继续通过原 executor 沙箱执行",
+        "模型审查不能覆盖确定性物理门",
+        "重核固定配方可直达；升级只归档精确旧配方；普通运行最多进入 Q2 candidate",
+        "看板按 run_id 关联分析摘要，首次轮询直达最新事件；管理操作要求临时令牌"
       ]
     },
     {
       "dot": "rose",
-      "title": "隔离执行与演进",
+      "title": "回退与信任边界",
       "items": [
-        "沙箱仅连 executor_internal，代码上限 20KB、执行 1-30s",
-        "read_only、cap_drop ALL、pids 256、内存 4GB、CPU 2 核",
-        "规划中的 skill_store 尚未上线，不能把成功退出码直接当作技能入库"
+        "Doctor 诊断配置、Compose、运行态与 executor 边界且不输出密钥值",
+        "模型响应限长且关闭重定向，客户端不接触密钥",
+        "执行与分析按 run_id 绑定并独立审计",
+        "通用技能负反馈即停止交付；显式重验后新手动证明才可恢复，自动学习不能复活"
       ]
     }
   ]

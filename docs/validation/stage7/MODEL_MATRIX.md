@@ -1,0 +1,100 @@
+# 阶段七模型矩阵与本地/Dify 对照
+
+当前技术结果：120条完整、四通道合同门均通过、80次实际新求解来源复核，跨通道差异0。原失败与降级数据保留；完整v1.0签署不由脚本自动完成。来源版本、实际限制与隔离故障演练见[本轮报告](MODEL_COMPATIBILITY_2026-10-26.md)。以下带日期内容是历史过程。
+
+
+当前结果：本地Chat/Reasoner/Pro各30条同b00a2b3源码，合同门通过且跨本地通道无差异；原Dify30条未通过（正例19/20、缺参保护0/5）。共享原始初压守卫候选2078回归通过，Dify结构校验通过，尚待发布与完整实跑。详见[本轮模型验收](MODEL_COMPATIBILITY_2026-10-26.md)。以下带日期段落保留历史，不覆盖本条。
+
+
+2026-10-26 修订：7b4400c三条本地lane已各完成30条，Chat正例20/20、Reasoner17/20、V4-Pro18/20；各10负例均不交付固定参考、5缺参均未完成。后两条出现参数提取transport超时，跨lane合同不一致，不能验收通过，旧记录保留。新候选2032回归通过，待冻结后重新完整运行。
+
+本固定集包含显式JSON，主要检验参数合同、检索与执行门，不能代表纯自然语言提取准确率。提取失败且原请求已有显式JSON时，仅将原始声明送入同一校验与真实执行，不补参；过期profile仍拒绝，纯自然语言仍需提取成功。`model_parameter_extraction_available=false`单独计数，报告明确提示；辅助审查/解释可用性也分别记录，降级不能提高物理等级。门户预设更新为原生deepseek-flash/deepseek-v4-pro，仍允许手动填旧模型ID。纯中文无JSON全流程另做真实浏览器验收。
+
+
+当前候选：用户已选Chat/Reasoner模式对照，并增加deepseek-v4-pro作为独立模型。旧别名不能证明两个独立模型；官方协议与实测身份见MODEL_PROFILES。c3d84d2试跑完整Chat为19/20正例、10负例无参考；Reasoner空响应试跑已停止并保留。辅助模型失败保留实际执行、说明可用性单独计数，2020回归通过；重跑需绑定修订后的候选SHA，不能将旧失败覆盖或混成新通过。
+
+2026-10-26：交付代码已到main 630c2f9，用户选择DeepSeek Chat与DeepSeek Reasoner执行本地两轮。首轮试跑因驱动批量回查完整历史超2MiB而中止，原记录保留；阶段七候选新增只返回同run五项执行事实的有界入口，多模型与首题驱动均精确回查，不放宽体积预算。1996回归通过；完整矩阵尚未验收，不将试跑写成通过。
+
+状态：**Dify lane 已完成 30/30；两个本地 BYOK lane 待执行**
+
+本验收固定使用阶段一的 30 道题：15 个精确配置、5 个同义表达、5 个越界配置、
+5 个缺参配置。不得改题、补跑后删除失败样本或降低确定性门。完整矩阵至少包含：
+
+1. 当前首选 OpenAI-compatible profile；
+2. 第二个不同模型 profile；
+3. 当前发布 Dify 工作流。
+
+每个 lane 各执行 30 次，共 90 次工作流运行。运行前应明确模型费用、候选 Git SHA、
+Dify 图摘要和模型标识。不同 lane 可以使用不同模型，但报告必须保留各自声明的模型标识，
+不能把编排差异误写成同模型严格 A/B。
+
+## 记录边界
+
+`model_matrix_acceptance.py` 只把以下内容写入 JSONL：lane、模型标识、候选或图摘要、
+任务编号、提示词 SHA-256、运行 ID、耗时、质量门、执行状态、固定参考是否交付和稳定错误码。
+它不会写入提示词正文、模型响应、生成代码、求解器输出、API endpoint、凭据或原始 SSE trace。
+
+JSONL 是可恢复的追加记录。同一 lane/任务已存在时不会重跑；重复 key、任务摘要漂移、
+模型标识或 revision 漂移会在离线评估时失败关闭。
+
+## 执行
+
+先确认本地网关使用候选源码，并为两个 profile 配置不同模型。可以使用两个环境 profile，
+也可以在门户依次注册两个临时 BYOK profile：模型 A 完成 30 题后再撤销并注册模型 B。
+每个本地 lane 在开始 30 题前会执行一次门户同款基础预检。临时 BYOK 的可重放句柄只用于
+调用当前网关，JSONL 只保存预检返回的 `byok-session:<摘要>`，不会保存该句柄：
+
+```bash
+python3 -m scripts.validation.model_matrix_acceptance run \
+  --backend local \
+  --lane local-model-a \
+  --profile model-a \
+  --revision <candidate-git-sha> \
+  --output <operator-evidence-dir>/records.jsonl
+
+python3 -m scripts.validation.model_matrix_acceptance run \
+  --backend local \
+  --lane local-model-b \
+  --profile model-b \
+  --revision <candidate-git-sha> \
+  --output <operator-evidence-dir>/records.jsonl
+```
+
+Dify lane 在能够访问发布工作流且已注入 `DIFY_API_KEY` 的受控环境执行。`revision`
+使用规范化发布图 SHA-256，`model-label` 使用本次实际配置的模型名称：
+
+```bash
+python3 -m scripts.validation.model_matrix_acceptance run \
+  --backend dify \
+  --lane dify-published \
+  --model-label <dify-model-name> \
+  --revision <published-graph-sha256> \
+  --dify-base-url http://nginx/v1 \
+  --output <operator-evidence-dir>/records.jsonl
+```
+
+可以先用 `--dry-run`、`--limit` 或重复的 `--task-id` 检查调度；发布验收必须恢复并完成
+全部 30 题，试跑不能单独冒充完整矩阵。
+
+门户临时 profile 默认 12 小时过期，网关重启或页面主动撤销后立即失效。每个 lane 必须在
+对应 profile 有效期内完成；命令中的 `--profile` 使用门户当前会话的不透明 profile id，
+不得把该 id 写入文档、提交、日志说明或聊天消息。
+
+`--timeout`（默认 360 秒）同时限制单次网络等待和整条工作流墙钟时间。即使 Dify
+持续发送 ping，超过上限也会停止未完成任务、追加一条 `timeout` 记录并继续后续题目。
+
+## 离线评估
+
+```bash
+python3 -m scripts.validation.model_matrix_acceptance evaluate \
+  --records <operator-evidence-dir>/records.jsonl \
+  --require-lane local-model-a \
+  --require-lane local-model-b \
+  --require-lane dify-published \
+  --output <operator-evidence-dir>/report.json
+```
+
+机械门要求：每个 lane 30/30 完整；20 个正例至少 95% 同时通过确定性门并交付固定参考；
+10 个负例不交付固定参考；5 个缺参题全部保持未完成且不猜测参考；跨 lane 的这些合同语义
+没有差异。报告即使 `targets_met=true` 仍保持 `formal_acceptance=false`，必须再核对部署身份、
+模型身份、Dify 发布图和运行来源后签字。

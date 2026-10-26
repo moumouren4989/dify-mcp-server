@@ -137,6 +137,7 @@ def _extract_sensor(stdout: str) -> dict | None:
                 continue
             return {
                 "time": time_values,
+                "timing_metadata": payload.get("timing_metadata"),
                 "pressure": pressure,
                 "sensor_index": payload.get("sensor_index") or payload.get("sensor_indices"),
                 "sensor_position": payload.get("sensor_position_m") or payload.get("sensor_position"),
@@ -364,11 +365,89 @@ def _summary(metrics: dict, verdict: str) -> str:
     return "，".join(parts)
 
 
+def _periodic_view(stdout, stderr, exit_code):
+    """Display validated fixed raw evidence without changing its receipt bytes.
+
+    The image is max-abs over three sampled snapshots, never full-time peak.
+    Numeric checks alone grant neither source identity nor reusable status.
+    """
+    try:
+        if exit_code != 0 or stderr or type(stdout) is not str or len(stdout.encode())>500000:
+            return None
+        from scripts.validation.host_forward_signature import unique, reject
+        from scripts.validation.periodic_eigenmodes import validate
+        body=json.loads(stdout,object_pairs_hook=unique,parse_constant=reject)
+        if type(body) is not dict or set(body)!={"raw_evidence"}:return None
+        result=validate(body)
+        if result.get("numeric_pass") is not True:return None
+        raw=body["raw_evidence"];frames=raw["snapshots"]
+        values=[max(abs(frame[i]) for frame in frames) for i in range(4096)]
+        payload={"shape":[64,64],"kind":"validated_sample_snapshots",
+                 "data":[values[i:i+64] for i in range(0,4096,64)]}
+        sensor={"time":raw["time"],"pressure":raw["traces"][0],
+                "sensor_index":raw["configuration"]["sensor_indices"][0]}
+        return payload,sensor,{"profile":raw["profile"],"numeric_pass":True,
+            "checked_metrics":result.get("relative_errors"),
+            "display_basis":"max_abs_of_three_snapshots",
+            "trusted_run":False,"actual_use_authenticated":False}
+    except (ValueError,TypeError,KeyError,IndexError,OverflowError,RecursionError,UnicodeError):
+        return None
+
+def _fixed_sensor_result(stdout, stderr, exit_code, source):
+    """Display independently checked traces without inventing a spatial field."""
+    try:
+        if exit_code != 0 or stderr or source.get("timed_out") or len(stdout.encode()) > 500000:
+            return None
+        from scripts.validation.host_forward_signature import unique, reject
+        body = json.loads(stdout, object_pairs_hook=unique, parse_constant=reject)
+        raw = body["raw_evidence"]
+        if raw["profile"] == "val1-plane-wave-v2":
+            from scripts.validation.plane_wave_evidence import validate_plane_wave
+            numeric = validate_plane_wave(body)
+            traces = [raw["pressure_x1"], raw["pressure_x2"]]
+        elif raw["profile"] == "val1-interface-wide-v2":
+            from scripts.validation.interface_waveform import validate_wide
+            numeric = validate_wide(stdout)
+            traces = [raw["pressure_left"], raw["pressure_right"]]
+        else:
+            return None
+        if numeric.get("numeric_pass") is not True:
+            return None
+        samples = [v for trace in traces for v in trace]
+        peak = max(abs(v) for v in samples)
+        rms = math.sqrt(sum(v*v for v in samples) / len(samples))
+        image = None
+        if _plt is not None:
+            fig, ax = _plt.subplots(figsize=(7, 3), dpi=100)
+            try:
+                for i, trace in enumerate(traces):
+                    ax.plot(raw["time"], trace, label="Sensor " + str(i+1))
+                ax.set(xlabel="Time (s)", ylabel="Pressure (Pa)", title="Validated sensor traces (not a spatial field)")
+                ax.legend(); fig.tight_layout()
+                buf = io.BytesIO(); fig.savefig(buf, format="png", bbox_inches="tight")
+                image = base64.b64encode(buf.getvalue()).decode("ascii")
+            finally:
+                _plt.close(fig)
+        return dict(verdict="normal", quality_level="Q2", has_signal=peak > 0,
+            max_pressure=peak, rms_pressure=rms, field_shape=[], units="Pa",
+            result_kind="sensor_time", metric_basis="all_samples_of_two_sensor_traces",
+            heatmap_png_base64=None, waveform_png_base64=image, waveform_kind="sensor_time",
+            sensor_samples=len(raw["time"]), sensor_peak_pressure=peak,
+            fixed_numeric_diagnostic=numeric, run_id=source.get("run_id") or None, execution_source=source,
+            physics_checks=[dict(check_id="fixed_sensor_waveform", passed=True,
+                detail="Pinned independent waveform validator passed; no spatial field or reusable grade inferred")],
+            summary=f"固定双传感器时间波形通过独立数值校验；采样峰值 {peak:.7g} Pa，采样 RMS {rms:.7g} Pa。"
+                "仅表示两个传感器的采样统计，不是二维压力场或全场峰值；Q2不授予技能复用许可。")
+    except (ValueError, TypeError, KeyError, IndexError, OverflowError, RecursionError, UnicodeError):
+        return None
+
+
 def _analyze_impl(
     stdout_text: str,
     stderr_text: str = "",
     exit_code: int = 0,
     params_json: str = "{}",
+    run_id: str = "",
 ) -> dict[str, Any]:
     """分析一次 jwave 仿真的输出：物理量摘要 + 热力图/波形图 + verdict。
 
@@ -379,8 +458,31 @@ def _analyze_impl(
     注：模块级独立实现，便于脱离 MCP 直接测试；register() 内注册同名工具，
     其函数体调用本函数（避免与工具名递归遮蔽）。
     """
+    from app.dashboard import resolve_execution_source
+    source = resolve_execution_source(stdout_text or "", stderr_text or "", exit_code, run_id)
+    # Consumption-time approval recheck: a retired or changed approval makes the
+    # recorded completion unusable, even though the run itself did execute.
+    try:
+        from app import runtime_registry_service as _registry
+        consumed = _registry.verify_completion_for_consumption(source.get("dispatch_nonce", ""))
+    except Exception:  # noqa: BLE001 - never let a governance lookup break analysis
+        consumed = {"consumable": False, "receipt_present": False,
+                    "trusted_run": False, "runtime_approved": False,
+                    "reason": "consumption_check_unavailable"}
+    source["approval_consumable"] = bool(consumed.get("consumable"))
+    source["approval_consumption_reason"] = consumed.get("reason")
+    run_id = source.get("run_id", "")
     payload = _extract_field(stdout_text or "")
+    if payload is None:
+        trace_result = _fixed_sensor_result(stdout_text or "", stderr_text or "", exit_code, source)
+        if trace_result is not None:
+            return trace_result
     sensor = _extract_sensor(stdout_text or "")
+    fixed_view = _periodic_view(stdout_text, stderr_text, exit_code) if payload is None else None
+    if fixed_view:
+        payload,sensor,_ = fixed_view
+    from app.physics_timing import assess_sensor_timing
+    timing = assess_sensor_timing(sensor)
     rows, shape = _to_float_matrix(payload["data"]) if payload else (None, None)
 
     if rows is None:
@@ -394,7 +496,7 @@ def _analyze_impl(
         verdict = _verdict(exit_code, False, metrics)
         if exit_code == 0 and verdict == "zero_field":
             verdict = "abnormal"  # 执行成功但未输出场数据 → 无法分析
-        return {
+        result = {
             "has_signal": False,
             "max_pressure": 0.0,
             "rms_pressure": 0.0,
@@ -406,6 +508,12 @@ def _analyze_impl(
             "verdict": verdict,
             "summary": f"未能从输出解析压力场（exit_code={exit_code}）。{_summary(metrics, verdict)}",
         }
+        from app.physics_gate import assess_quality
+        result.update(assess_quality(exit_code=exit_code, timed_out=source.get("timed_out", False), analysis=result, params_json=params_json))
+        result["timing_diagnostic"] = timing
+        result["run_id"] = run_id or None
+        result["execution_source"] = source
+        return result
 
     metrics = _compute_metrics(rows, shape)
     if isinstance(payload.get("shape"), list) and len(payload["shape"]) >= 2:
@@ -425,7 +533,7 @@ def _analyze_impl(
     sensor_pressure = sensor.get("pressure", []) if sensor else []
     sensor_peak = max((abs(float(v)) for v in sensor_pressure), default=None)
 
-    return {
+    result = {
         "has_signal": metrics["has_signal"],
         "max_pressure": metrics["max_pressure"],
         "rms_pressure": metrics["rms_pressure"],
@@ -440,6 +548,54 @@ def _analyze_impl(
         "verdict": verdict,
         "summary": _summary(metrics, verdict),
     }
+    from app.physics_gate import assess_quality
+    result.update(assess_quality(exit_code=exit_code, timed_out=source.get("timed_out", False), analysis=result, params_json=params_json))
+    result["timing_diagnostic"] = timing
+    result["run_id"] = run_id or None
+    result["execution_source"] = source
+    if fixed_view:
+        result["fixed_numeric_diagnostic"] = fixed_view[2]
+        result["summary"] += " 图像为三个采样时刻的绝对声压包络，非全时峰值或稳态证明。"
+    return result
+
+
+def analyze_and_record(
+    stdout_text: str,
+    stderr_text: str = "",
+    exit_code: int = 0,
+    params_json: str = "{}",
+    run_id: str = "",
+) -> dict[str, Any]:
+    """Analyze one execution and persist its analysis event exactly once."""
+    result = _analyze_impl(
+        stdout_text,
+        stderr_text,
+        exit_code,
+        params_json,
+        run_id,
+    )
+    # Analysis history is separate from execution history. Recording failure must
+    # never turn a completed deterministic analysis into a workflow failure.
+    try:
+        from app.dashboard import record_analysis_event
+
+        record_analysis_event(
+            exit_code=exit_code,
+            verdict=result.get("verdict", "unknown"),
+            max_pressure=result.get("max_pressure"),
+            rms_pressure=result.get("rms_pressure"),
+            field_shape=result.get("field_shape"),
+            has_signal=bool(result.get("has_signal")),
+            summary=result.get("summary", ""),
+            heatmap_base64=result.get("heatmap_png_base64"),
+            waveform_base64=result.get("waveform_png_base64"),
+            stdout_excerpt=(stdout_text or "")[:500],
+            stderr_excerpt=(stderr_text or "")[:200],
+            run_id=result.get("run_id"),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return result
 
 
 def register(mcp) -> None:
@@ -451,6 +607,7 @@ def register(mcp) -> None:
         stderr_text: str = "",
         exit_code: int = 0,
         params_json: str = "{}",
+        run_id: str = "",
     ) -> dict[str, Any]:
         """Analyze a jwave simulation output: physics summary + heatmap/waveform + verdict.
 
@@ -459,29 +616,10 @@ def register(mcp) -> None:
         Returns has_signal, max/rms pressure, field shape, heatmap/waveform PNG
         (base64) and a physical verdict (normal / zero_field / abnormal).
         """
-        r = _analyze_impl(
+        return analyze_and_record(
             stdout_text,
             stderr_text,
             exit_code,
             params_json,
+            run_id,
         )
-        # 结果分析写入独立 analysis_events，不再污染执行历史。
-        try:
-            from dashboard import record_analysis_event
-
-            record_analysis_event(
-                exit_code=exit_code,
-                verdict=r.get("verdict", "unknown"),
-                max_pressure=r.get("max_pressure"),
-                rms_pressure=r.get("rms_pressure"),
-                field_shape=r.get("field_shape"),
-                has_signal=bool(r.get("has_signal")),
-                summary=r.get("summary", ""),
-                heatmap_base64=r.get("heatmap_png_base64"),
-                waveform_base64=r.get("waveform_png_base64"),
-                stdout_excerpt=(stdout_text or "")[:500],
-                stderr_excerpt=(stderr_text or "")[:200],
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        return r

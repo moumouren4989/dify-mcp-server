@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "architecture",
+  "input": "docs/diagrams/acouagent-runtime.architecture.json",
+  "output": "docs/diagrams/acouagent-runtime.architecture.html",
+  "specification": {
+    "sha256": "1427832ffc0148963ea931a5fd1a91c55771b107415c3b9be5350af7fc8f6be1",
+    "bytes": 11064
+  },
+  "artifact": {
+    "sha256": "90aea594bf4d86ec1fd4be245c34a38af1dd40cf0e56b5dca1fb464fb2d6b1c2",
+    "bytes": 726824
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  },
+  "operator_paths_redacted": true
+}
