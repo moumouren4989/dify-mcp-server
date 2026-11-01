@@ -8,7 +8,7 @@ import httpx
 from app import config
 
 BASE_URL = config.DIFY_BASE_URL
-DEADLINE_SECONDS = 180
+DEADLINE_SECONDS = 600
 MAX_EVENT_BYTES = 8 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ async def workflow_events(query, user, api_key):
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         async with asyncio.timeout(DEADLINE_SECONDS):
-            async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=10), follow_redirects=False) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=10), follow_redirects=False) as client:
                 async with client.stream("POST", BASE_URL + "/workflows/run", headers=headers,
                                          json={"inputs": {"query": query}, "user": user,
                                                "response_mode": "streaming"}) as response:
