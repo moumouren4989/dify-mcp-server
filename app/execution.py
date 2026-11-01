@@ -229,6 +229,10 @@ def _normalize_result_artifacts(result: dict[str, Any]) -> dict[str, Any]:
             result.get("stderr", "") or "",
             int(result.get("exit_code") or 0),
         )
+        result["analysis"] = {
+            key: analyzed.get(key)
+            for key in ("verdict", "quality_level", "physics_checks", "summary")
+        }
         heatmap = analyzed.get("heatmap_png_base64")
         if heatmap:
             result["image_base64"] = heatmap
@@ -268,6 +272,54 @@ def _timing_report_note(stdout: str) -> str:
     else:
         note = "时间轴或物理参数不足以判定传播时长与稳态；执行完成不代表物理验证通过。"
     return note
+
+
+_VERDICT_LABEL = {
+    "normal": "正常 — 场数据有限且非零，未见数值发散",
+    "zero_field": "全零场 — 常见于源坐标/类型错误、p0 误用为 Sources",
+    "abnormal": "异常 — 执行失败或数值发散/NaN",
+}
+
+_QUALITY_LABEL = {
+    "Q0": "Q0 · 无可用证据",
+    "Q1": "Q1 · 执行成功且场数据有限非零",
+    "Q2": "Q2 · 候选，尚未独立认证",
+    "Q3": "Q3 · 已通过指定范围独立验证",
+    "Q4": "Q4 · 已有指定范围的物理验证记录",
+}
+
+_CHECK_LABEL = {
+    "execution_recorded": "执行记录存在",
+    "execution_succeeded": "执行成功（退出码 0 且未超时）",
+    "finite_nonzero_field": "场数据有限且非零",
+    "parameters_supplied": "已提供结构化仿真参数",
+    "parameters_complete": "最小物理参数齐全",
+    "parameter_constraints": "参数约束（网格/PML/间距/源分辨率/CFL）",
+    "pml_geometry": "源/传感器位置在 PML 之外",
+}
+
+
+def _physics_validation_lines(analyzed: dict[str, Any] | None, timing_note: str | None) -> list[str]:
+    """Build the physics-validation section from a deterministic analysis result."""
+    analyzed = analyzed or {}
+    lines: list[str] = []
+    verdict = analyzed.get("verdict")
+    if verdict:
+        lines.append(f"- 物理判定：{_VERDICT_LABEL.get(verdict, str(verdict))}")
+    quality = analyzed.get("quality_level")
+    if quality:
+        lines.append(f"- 证据等级：{_QUALITY_LABEL.get(quality, str(quality))}")
+    checks = analyzed.get("physics_checks") or []
+    if checks:
+        passed = sum(1 for c in checks if c.get("passed"))
+        lines.append(f"- 确定性物理门：{passed}/{len(checks)} 项通过")
+        for c in [c for c in checks if not c.get("passed")][:3]:
+            lines.append(f"  - 未通过：{_CHECK_LABEL.get(c.get('check_id', ''), c.get('check_id', ''))}")
+    if timing_note:
+        lines.append(f"- 时长/稳态：{timing_note}")
+    if lines:
+        lines.append("- 判定口径：对标 `docs/VALIDATION_BASELINE.md`（VAL-1 解析解/数值基准）")
+    return lines
 
 
 def _build_report(result: dict[str, Any], original_code: str) -> str:
@@ -345,8 +397,9 @@ def _build_report(result: dict[str, Any], original_code: str) -> str:
     lines.append(f"| 尝试次数 | {total_attempts} 次 |")
     lines.append("")
 
-    if timing_note:
-        lines.extend(["### 物理验证说明", "", timing_note, ""])
+    physics_lines = _physics_validation_lines(result.get("analysis"), timing_note)
+    if physics_lines:
+        lines.extend(["### 物理验证说明", ""] + physics_lines + [""])
 
     if max_pressure is not None or pressure_shape:
         lines.append("### 📈 关键数据")

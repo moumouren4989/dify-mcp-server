@@ -634,6 +634,7 @@ async def workflow_events(query: str, user: str, profile_id: str | None, *, _con
         display_image = analyzed.get("heatmap_png_base64") or analyzed.get("waveform_png_base64")
         if not report_result.get("image_base64") and display_image:
             report_result["image_base64"] = display_image
+        report_result["analysis"] = analyzed
         report = execution._build_report(report_result, first_code or code)
         if _confirmed is not None and _confirmed.extraction_origin == 'explicit_declaration':
             report += '\n\n本次参数直接来自用户明确的完整声明，无需调用参数提取模型；确认后的参数未重新识别。'
